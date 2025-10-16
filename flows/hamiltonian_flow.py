@@ -123,6 +123,7 @@ def run_hamiltonian_flow(parametric_model: nnx.Module,
     # Generate initial batch of reference samples
     key, subkey = jax.random.split(key)
     problem_dim = test_data_set.shape[1]
+    #TODO: take as input the sampling function of the reference density
     z_samples = jax.random.normal(subkey, (batch_size, problem_dim))
 
     # Initialize momentum using phi function
@@ -157,6 +158,7 @@ def run_hamiltonian_flow(parametric_model: nnx.Module,
             _, samples0, _, _, _ = potential.evaluate_energy(current_parametric_model, test_data_set)
 
         # Generate fresh samples for this iteration
+        #TODO: Use the sampling function of the reference density
         key, subkey = jax.random.split(key)
         z_samples_eval = jax.random.normal(subkey, (batch_size, problem_dim))
         _,prev_parms = nnx.split(current_parametric_model)

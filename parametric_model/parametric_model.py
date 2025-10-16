@@ -209,6 +209,7 @@ class ParametricModel(nnx.Module):
         Args:
             samples: Input samples from reference density, shape (batch_size, dim)
             params: Model parameters
+            history: Whether to return the full trajectory (only for NODE models)
             
         Returns:
             Transported samples T_θ(samples), shape (batch_size, dim)

@@ -28,7 +28,7 @@ def move_to_device(pytree: Any, device) -> Any:
 
 
 def run_gradient_flow(parametric_model: ParametricModel, z_samples: Array, G_mat: G_matrix,
-                     potential: Potential, device_idx: int = 0, h: float = 0.01, solver: str = "minres",
+                     potential: Potential, h: float = 0.01, solver: str = "minres",
                      max_iterations: int = 100, tolerance: float = 1e-6,
                      regularization: float = 1e-6, 
                      progress_every: int = 10) -> dict:
