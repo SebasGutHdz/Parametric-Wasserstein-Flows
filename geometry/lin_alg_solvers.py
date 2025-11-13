@@ -1,22 +1,29 @@
 import os
 import sys
+
 # Add the parent directory to the system path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-from typing import Callable,Optional,Any,List,Tuple
-from jaxtyping import PyTree,Array
+from typing import Callable, Optional, Any, List, Tuple
+from jaxtyping import PyTree, Array
 import jax
-import jax.numpy as jnp 
+import jax.numpy as jnp
 from jax.scipy.sparse.linalg import cg
 from jax import lax
 
 
-def reg_cg(A_func: Callable, b: PyTree,epsilon: float =  1e-6, tol: float = 1e-6, x0: Optional[PyTree] = None, maxiter: int = 100) -> tuple[PyTree, dict]:
+def reg_cg(
+    A_func: Callable,
+    b: PyTree,
+    epsilon: float = 1e-6,
+    tol: float = 1e-6,
+    x0: Optional[PyTree] = None,
+    maxiter: int = 100,
+) -> tuple[PyTree, dict]:
 
     def regu_A(x: PyTree) -> PyTree:
-        return jax.tree.map(lambda x,y: x+epsilon*y, A_func(x), x)
-
+        return jax.tree.map(lambda x, y: x + epsilon * y, A_func(x), x)
 
     return cg(regu_A, b, x0=x0, tol=tol, maxiter=maxiter)
 
@@ -26,17 +33,22 @@ def dot_tree(x: PyTree, y: PyTree) -> Array:
     yl = jax.tree.leaves(y)
     return sum(jnp.vdot(a, b) for a, b in zip(xl, yl))
 
+
 def norm_tree(x: PyTree) -> Array:
     return jnp.sqrt(jnp.real(dot_tree(x, x)))
+
 
 def scale_tree(x: PyTree, alpha: Array) -> PyTree:
     return jax.tree.map(lambda a: alpha * a, x)
 
+
 def add_trees(x: PyTree, y: PyTree) -> PyTree:
     return jax.tree.map(lambda a, b: a + b, x, y)
 
+
 def zeros_like_tree(x: PyTree) -> PyTree:
     return jax.tree.map(jnp.zeros_like, x)
+
 
 def linear_combination(vs: List[PyTree], coeffs: Array) -> PyTree:
     """Compute sum_j coeffs[j] * vs[j] where vs is list of PyTrees and coeffs is 1D array."""
@@ -44,6 +56,7 @@ def linear_combination(vs: List[PyTree], coeffs: Array) -> PyTree:
     for j, vj in enumerate(vs):
         out = add_trees(out, scale_tree(vj, coeffs[j]))
     return out
+
 
 def minres(
     A_func: Callable[[PyTree], PyTree],

@@ -1,5 +1,13 @@
 from typing import (
-    Any, Dict, List, Optional, Tuple, Union, Callable, Protocol, NamedTuple
+    Any,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+    Callable,
+    Protocol,
+    NamedTuple,
 )
 from typing_extensions import TypeAlias
 import jax
@@ -16,27 +24,26 @@ PyTreeParams: TypeAlias = PyTree
 """PyTree structure containing model parameters."""
 
 
-
 # Sample and trajectory arrays
 SampleArray: TypeAlias = Float[Array, "batch_size dim"]
-''' Array of shape (batch_size, dim) representing samples.'''
+""" Array of shape (batch_size, dim) representing samples."""
 
 TrajectoryArray: TypeAlias = Float[Array, "batch_size time_steps dim"]
-''' Array of shape (batch_size, time_steps, dim) representing trajectories.'''
+""" Array of shape (batch_size, time_steps, dim) representing trajectories."""
 
 # Time-related arrays
 TimeArray: TypeAlias = Float[Array, "batch_size"]
-''' Array of shape (batch_size,) representing time points in [0,1].'''
+""" Array of shape (batch_size,) representing time points in [0,1]."""
 
 TimeStepsArray: TypeAlias = Float[Array, "time_steps"]
-''' Array of shape (time_steps,) representing discrete time steps for integration.'''
+""" Array of shape (time_steps,) representing discrete time steps for integration."""
 
 # Velocity and dynamics arrays
 VelocityArray: TypeAlias = Float[Array, "batch_size dim"]
-''' Array of shape (batch_size, dim) representing velocities.'''
+""" Array of shape (batch_size, dim) representing velocities."""
 
 VelocityFieldArray: TypeAlias = Float[Array, "batch_size time_steps dim"]
-''' Array of shape (batch_size, time_steps, dim) representing velocity fields over time.'''
+""" Array of shape (batch_size, time_steps, dim) representing velocity fields over time."""
 
 # Score and density arrays
 ScoreArray: TypeAlias = Float[Array, "batch_size dim"]
@@ -61,5 +68,3 @@ ModelParams: TypeAlias = PyTreeParams
 
 ModelState: TypeAlias = Optional[nnx.State]
 """Optional state for stateful models (e.g., batch norm)."""
-
-

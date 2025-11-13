@@ -1,5 +1,6 @@
 import os
-os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 import jax
 import jax.random as jrandom
 import jax.numpy as jnp
@@ -10,23 +11,25 @@ import numpy as np
 import platform
 
 
-
 class SinActivation(nn.Module):
     """Sine activation function."""
-    
+
     def __call__(self, x):
         return jnp.sin(x)
 
 
 class SinTUActivation(nn.Module):
     """Sine Truncated Unit activation function: SinTU_s = sin(max(x, s))"""
+
     s: float = -jnp.pi  # Default truncation parameter
-    
+
     def __call__(self, x):
         return jnp.sin(jnp.maximum(x, self.s))
-    
+
+
 class MMNNLayer(nn.Module):
     """MMNN Layer with JAX-safe fixed weights"""
+
     d_in: int
     width: int
     d_out: int
@@ -34,45 +37,60 @@ class MMNNLayer(nn.Module):
     use_bias: bool = True
     seed: int = 0
     FixWb: bool = True  # Whether to fix weights and biases
-    
+
     @nn.compact
     def __call__(self, x):
         """Forward pass with JAX-safe parameter handling"""
+
         def init_W():
             key = jrandom.PRNGKey(self.seed)
-            return jrandom.normal(key, (self.width, self.d_in)) * jnp.sqrt(2.0 / self.d_in)
-        
+            return jrandom.normal(key, (self.width, self.d_in)) * jnp.sqrt(
+                2.0 / self.d_in
+            )
+
         def init_b():
             key = jrandom.PRNGKey(self.seed + 1)  # Different seed for b
             return jrandom.normal(key, (self.width,)) * jnp.sqrt(2.0 / self.d_in)
+
         if self.FixWb:
             # Create non-trainable variables (excluded from parameter updates)
-            W = self.variable('fixed', 'W', init_W).value
-            b = self.variable('fixed', 'b', init_b).value if self.use_bias else jnp.zeros(self.width)
+            W = self.variable("fixed", "W", init_W).value
+            b = (
+                self.variable("fixed", "b", init_b).value
+                if self.use_bias
+                else jnp.zeros(self.width)
+            )
         else:
             # Create trainable parameters
-            W = self.param('W', nn.initializers.xavier_normal(), (self.width, self.d_in))
-            b = self.param('b', nn.initializers.zeros, (self.width,)) if self.use_bias else jnp.zeros(self.width)
-        
+            W = self.param(
+                "W", nn.initializers.xavier_normal(), (self.width, self.d_in)
+            )
+            b = (
+                self.param("b", nn.initializers.zeros, (self.width,))
+                if self.use_bias
+                else jnp.zeros(self.width)
+            )
+
         # Compute fixed transformation
         z = jnp.dot(x, W.T) + b
         activated = self.activation(z)
-        
+
         # Trainable linear combination
-        A = self.param('A', nn.initializers.xavier_normal(), (self.d_out, self.width))
-        c = self.param('c', nn.initializers.zeros, (self.d_out,))
-        
+        A = self.param("A", nn.initializers.xavier_normal(), (self.d_out, self.width))
+        c = self.param("c", nn.initializers.zeros, (self.d_out,))
+
         return jnp.dot(activated, A.T) + c
 
 
 class MMNN(nn.Module):
     """Simple MMNN using JAX-safe layers"""
+
     ranks: list
     widths: list
-    activation: callable = SinTUActivation(),
-    ResNet: bool = False,
+    activation: callable = (SinTUActivation(),)
+    ResNet: bool = (False,)
     FixWb: bool = True
-    
+
     @nn.compact
     def __call__(self, x):
         # Build layers based on ranks and widths
@@ -80,23 +98,25 @@ class MMNN(nn.Module):
             if self.ResNet:
                 if 0 < i < len(self.widths):
                     x_id = x + 0
-            
+
             x = MMNNLayer(
                 d_in=self.ranks[i] if i == 0 else self.ranks[i],
                 width=width,
-                d_out=self.ranks[i+1],
+                d_out=self.ranks[i + 1],
                 activation=self.activation,
                 seed=i,
-                FixWb=self.FixWb
+                FixWb=self.FixWb,
             )(x)
-            if self.ResNet and 0 < i < len(self.widths)-1:
+            if self.ResNet and 0 < i < len(self.widths) - 1:
                 n = min(x.shape[1], x_id.shape[1])
-                x = x.at[:, :n].add(x_id[:, :n]) # Notation for in-place addition in JAX
+                x = x.at[:, :n].add(
+                    x_id[:, :n]
+                )  # Notation for in-place addition in JAX
         return x
 
 
-class Train_jax_model():
-    '''
+class Train_jax_model:
+    """
     This a basic training scheme for a jax model.
     Inputs:
         model: A Flax model to train
@@ -111,17 +131,21 @@ class Train_jax_model():
     Outputs:
         params: Trained model parameters
         training_info: Dictionary containing training and validation losses
-    '''
-    def __init__(self, model: nn.Module,
-                 input_data: jnp.ndarray,
-                 target_data: jnp.ndarray,
-                 optimizer: str = 'adam',
-                 loss_fn: str = 'mse',
-                 learning_rate: float = 0.001,
-                 num_epochs: int = 1000,
-                 batch_size: int = 32,
-                 random_seed: int = 0,
-                 device = 0):
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        input_data: jnp.ndarray,
+        target_data: jnp.ndarray,
+        optimizer: str = "adam",
+        loss_fn: str = "mse",
+        learning_rate: float = 0.001,
+        num_epochs: int = 1000,
+        batch_size: int = 32,
+        random_seed: int = 0,
+        device=0,
+    ):
         self.model = model
         self.loss_fn = self._create_loss_fn(loss_fn)
         self.learning_rate = learning_rate
@@ -129,41 +153,45 @@ class Train_jax_model():
         self.batch_size = batch_size
         self.random_seed = random_seed
 
-        self.device = jax.devices("gpu")[device] if jax.devices("gpu") else jax.devices("cpu")[0]
+        self.device = (
+            jax.devices("gpu")[device] if jax.devices("gpu") else jax.devices("cpu")[0]
+        )
 
         input_data = jax.device_put(input_data, self.device)
         target_data = jax.device_put(target_data, self.device)
 
-
         self.n_samples = jnp.shape(input_data)[0]
-        
+
         self.key = jrandom.PRNGKey(random_seed)
-        self.split_train_test(input_data, target_data) # Stores self.x_train, self.y_train, self.x_test, self.y_test
+        self.split_train_test(
+            input_data, target_data
+        )  # Stores self.x_train, self.y_train, self.x_test, self.y_test
         self.n_batches = jnp.shape(self.x_train)[0] // self.batch_size
-        
-        
+
         # Create optimizer
-        if optimizer == 'adam':
+        if optimizer == "adam":
             self.optimizer = optax.adam(learning_rate)
-        elif optimizer == 'sgd':
+        elif optimizer == "sgd":
             self.optimizer = optax.sgd(learning_rate)
         else:
             raise ValueError(f"Unsupported optimizer: {optimizer}")
-        
+
         # Create training step function
         self.train_step = self._create_train_step()
-        
+
     # Create loss function
     def _create_loss_fn(self, loss_type):
-        if loss_type == 'mse':
+        if loss_type == "mse":
             return lambda params, x, y: jnp.mean((self.model.apply(params, x) - y) ** 2)
-        elif loss_type == 'mae':
-            return lambda params, x, y: jnp.mean(jnp.abs(self.model.apply(params, x) - y))
+        elif loss_type == "mae":
+            return lambda params, x, y: jnp.mean(
+                jnp.abs(self.model.apply(params, x) - y)
+            )
         else:
             raise ValueError(f"Unsupported loss function: {loss_type}")
 
     # Process input and target data
-    def split_train_test(self,input_data,target_data,test_split = 0.2):
+    def split_train_test(self, input_data, target_data, test_split=0.2):
         """
         Split input and target data into training and validation sets
         """
@@ -171,7 +199,7 @@ class Train_jax_model():
         n_train = self.n_samples - n_test
 
         # Random indices for shuffling
-        indices = jrandom.permutation(self.key,self.n_samples)
+        indices = jrandom.permutation(self.key, self.n_samples)
         train_indices = indices[:n_train]
         test_indices = indices[n_train:]
 
@@ -194,34 +222,34 @@ class Train_jax_model():
         """
         # The last incomplete batch will be ignored
         for i in range(0, self.n_batches * self.batch_size, self.batch_size):
-            x_batch = x_data[i:i + self.batch_size]
-            y_batch = y_data[i:i + self.batch_size]
+            x_batch = x_data[i : i + self.batch_size]
+            y_batch = y_data[i : i + self.batch_size]
             # yield is used to create a generator
             # This allows us to iterate over batches without loading everything into memory
             yield x_batch, y_batch
-        
-    # Define training step function 
+
+    # Define training step function
     def _create_train_step(self):
         """Create a JIT-compiled training step function"""
-        
+
         @jax.jit
         def train_step(params, opt_state, x_batch, y_batch):
             # Capture self variables in closure
-            loss, grads = jax.value_and_grad(self.loss_fn)(params, x_batch, y_batch) 
+            loss, grads = jax.value_and_grad(self.loss_fn)(params, x_batch, y_batch)
             updates, new_opt_state = self.optimizer.update(grads, opt_state)
             new_params = optax.apply_updates(params, updates)
             return new_params, new_opt_state, loss
-        
-        return train_step
-    
 
-    def training_loop(self,print_every: int = 100):
+        return train_step
+
+    def training_loop(self, print_every: int = 100):
 
         import matplotlib.pyplot as plt
+
         """
         Training loop
         """
-            
+
         training_losses = []
         validation_losses = []
 
@@ -242,46 +270,62 @@ class Train_jax_model():
             x_train_shuffled = self.x_train[perm]
             y_train_shuffled = self.y_train[perm]
             # Iterate over batches
-            for x_batch, y_batch in self.batch_generator(x_train_shuffled, y_train_shuffled):
+            for x_batch, y_batch in self.batch_generator(
+                x_train_shuffled, y_train_shuffled
+            ):
 
                 # Perform a training step
-                params, opt_state, loss = self.train_step(params, opt_state, x_batch, y_batch)
+                params, opt_state, loss = self.train_step(
+                    params, opt_state, x_batch, y_batch
+                )
                 epoch_loss.append(loss)
 
             self.params_store = params  # Store the latest parameters
             # Average loss for the epoch
-            avg_loss = jnp.mean(jnp.array(epoch_loss)) 
+            avg_loss = jnp.mean(jnp.array(epoch_loss))
             training_losses.append(avg_loss)
 
-            
-
-            if print_every < jnp.inf and (epoch % print_every == 0 or epoch == self.num_epochs - 1):
+            if print_every < jnp.inf and (
+                epoch % print_every == 0 or epoch == self.num_epochs - 1
+            ):
                 # Compute validation loss
                 val_loss = self.loss_fn(params, self.x_test, self.y_test)
                 validation_losses.append(val_loss)
                 # Plot the model predictions
-                idx_sort = jnp.argsort(self.x_test, axis=0)  # Sort for consistent plotting
+                idx_sort = jnp.argsort(
+                    self.x_test, axis=0
+                )  # Sort for consistent plotting
                 x_test_local = self.x_test[idx_sort]
                 y_test_local = self.y_test[idx_sort]
                 predictions = self.model.apply(params, x_test_local)
                 plt.figure(figsize=(10, 5))
-                plt.plot(x_test_local.flatten(), y_test_local.flatten(), label='True Function', color='blue')
-                plt.plot(x_test_local.flatten(), predictions.flatten(), label='Model Predictions', color='red')
-                plt.title(f'Epoch {epoch + 1}/{self.num_epochs} - Validation Loss: {val_loss:.4f}')
-                plt.xlabel('x')
-                plt.ylabel('y')
+                plt.plot(
+                    x_test_local.flatten(),
+                    y_test_local.flatten(),
+                    label="True Function",
+                    color="blue",
+                )
+                plt.plot(
+                    x_test_local.flatten(),
+                    predictions.flatten(),
+                    label="Model Predictions",
+                    color="red",
+                )
+                plt.title(
+                    f"Epoch {epoch + 1}/{self.num_epochs} - Validation Loss: {val_loss:.4f}"
+                )
+                plt.xlabel("x")
+                plt.ylabel("y")
                 plt.legend()
                 plt.grid()
                 plt.show()
-                print(f"Epoch {epoch + 1}/{self.num_epochs}, "
-                      f"Training Loss: {avg_loss:.4f}, "
-                      f"Validation Loss: {val_loss:.4f}")
-        
-                
-        return params, {'training_losses': training_losses, 'validation_losses': validation_losses}
+                print(
+                    f"Epoch {epoch + 1}/{self.num_epochs}, "
+                    f"Training Loss: {avg_loss:.4f}, "
+                    f"Validation Loss: {val_loss:.4f}"
+                )
 
-
-                    
-
-
-
+        return params, {
+            "training_losses": training_losses,
+            "validation_losses": validation_losses,
+        }

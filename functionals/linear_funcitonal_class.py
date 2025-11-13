@@ -1,5 +1,6 @@
 import os
 import sys
+
 # Add the parent directory to the system path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -12,19 +13,25 @@ import matplotlib.pyplot as plt
 from parametric_model.parametric_model import ParametricModel
 
 
-
 class LinearPotential:
     """
     A class for handling linear potential energy functionals F(ρ) = ∫ U(x)ρ(x)dx
     where U(x) is a user-defined potential function.
     """
 
-    def __init__(self, potential_fn: Callable[[Array], Array], coeff: Optional[float] = 0.0, x_bds: Optional[Array] = None, y_bds: Optional[Array] = None, **potential_kwargs):
+    def __init__(
+        self,
+        potential_fn: Callable[[Array], Array],
+        coeff: Optional[float] = 0.0,
+        x_bds: Optional[Array] = None,
+        y_bds: Optional[Array] = None,
+        **potential_kwargs
+    ):
         """
         Initialize LinearPotential with a potential function.
-        
+
         Args:
-            potential_fn: Function that takes positions (batch_size, d) and returns 
+            potential_fn: Function that takes positions (batch_size, d) and returns
                          potential values (batch_size,)
             **potential_kwargs: Additional keyword arguments for the potential function
         """
@@ -44,7 +51,7 @@ class LinearPotential:
     def __call__(self, x: Array) -> Array:
         """
         Evaluate potential at given positions.
-        
+
         Args:
             x: Positions array of shape (batch_size, d)
         Returns:
@@ -52,21 +59,25 @@ class LinearPotential:
         """
         return self.potential_fn(x, **self.potential_kwargs)
 
-    def compute_energy_gradient(self, parametric_model: ParametricModel, z_samples: Array,
-                                 params: Optional[PyTree] = None) -> PyTree:
+    def compute_energy_gradient(
+        self,
+        parametric_model: ParametricModel,
+        z_samples: Array,
+        params: Optional[PyTree] = None,
+    ) -> PyTree:
         """
-        Compute gradient of energy functional 
-        
+        Compute gradient of energy functional
+
         Args:
             parametric_model: ParametricModel instance
             z_samples: Reference samples (batch_size, d)
             params: Parameters to evaluate gradient at (if None, uses current node params)
         Returns:
-            Gradient 
+            Gradient
         """
         if params is None:
             _, params = nnx.split(parametric_model)
-        
+
         def energy_functional(p: PyTree) -> Array:
             # Transform reference samples through flow
             x_samples = parametric_model(z_samples, params=p)
@@ -74,15 +85,20 @@ class LinearPotential:
             potential_values = self.potential_fn(x_samples, **self.potential_kwargs)
             return jnp.mean(potential_values)
 
-        values,grad = jax.value_and_grad(energy_functional)(params)
+        values, grad = jax.value_and_grad(energy_functional)(params)
 
-        return grad,values
+        return grad, values
 
-    def evaluate_energy(self, parametric_model: ParametricModel, z_samples: Array,x_samples: Optional[Array] = None,
-                       params: Optional[PyTree] = None) -> tuple[Array, Array]:
+    def evaluate_energy(
+        self,
+        parametric_model: ParametricModel,
+        z_samples: Array,
+        x_samples: Optional[Array] = None,
+        params: Optional[PyTree] = None,
+    ) -> tuple[Array, Array]:
         """
         Evaluate current energy F(rho_theta)
-        
+
         Args:
             node: Neural ODE model
             z_samples: Reference samples
@@ -103,7 +119,7 @@ class LinearPotential:
         else:
             return jnp.mean(potential_values), None
 
-    def plot_function(self,fig = None, ax=None, x_bds=None, y_bds=None):
+    def plot_function(self, fig=None, ax=None, x_bds=None, y_bds=None):
         """
         Plot the potential function U(x) over the defined boundaries.
         """
@@ -111,17 +127,19 @@ class LinearPotential:
             fig, ax = plt.subplots()
         if x_bds is None:
             x_bds = self.x_bds
-        if y_bds is None:   
+        if y_bds is None:
             y_bds = self.y_bds
         x = jnp.linspace(x_bds[0], x_bds[1], 100)
         y = jnp.linspace(y_bds[0], y_bds[1], 100)
         X, Y = jnp.meshgrid(x, y)
-        Z = self.potential_fn(jnp.stack([X.ravel(), Y.ravel()], axis=-1), **self.potential_kwargs)
+        Z = self.potential_fn(
+            jnp.stack([X.ravel(), Y.ravel()], axis=-1), **self.potential_kwargs
+        )
         Z = Z.reshape(X.shape)
 
-        contour = ax.contourf(X, Y, Z, levels=100, cmap='cividis', alpha=0.5)
+        contour = ax.contourf(X, Y, Z, levels=100, cmap="cividis", alpha=0.5)
         fig.colorbar(contour)
-        ax.set_xlabel('x')
-        ax.set_ylabel('y')
-        ax.set_title('Potential Function U(x, y)')
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_title("Potential Function U(x, y)")
         return ax
