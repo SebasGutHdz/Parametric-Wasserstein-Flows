@@ -171,7 +171,7 @@ class G_matrix:
         """
         Compute the gradient of the G matrix in the direction eta. We are returning the PyTree
 
-        [neta^T \partial_{theta_k} G(theta) neta]_{k=1}^{N_params}
+        [neta^T \\partial_{theta_k} G(theta) neta]_{k=1}^{N_params}
 
         Args:
             z_samples: (Bs,d) Samples from reference density
