@@ -22,7 +22,7 @@ class LinearPotential:
     def __init__(
         self,
         potential_fn: Callable[[Array], Array],
-        coeff: Optional[float] = 0.0,
+        coeff: Optional[float] = 1.0,
         x_bds: Optional[Array] = None,
         y_bds: Optional[Array] = None,
         **potential_kwargs
