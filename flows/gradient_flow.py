@@ -35,6 +35,7 @@ def run_gradient_flow(
     z_samples: Array,
     G_mat: G_matrix,
     potential: Potential,
+    N_samples: int = 100,
     h: float = 0.01,
     solver: str = "minres",
     max_iterations: int = 100,
@@ -68,10 +69,11 @@ def run_gradient_flow(
     solver_stats = []
     param_norms = []
     sample_history = []  # Store samples at key iterations for visualization
+    euclid_grad_norm_history = []
+    riemann_grad_norm_history = []
 
     # Initialize key for sample generation
     key = jax.random.PRNGKey(0)
-    n_samples = len(z_samples)
     # with jax.default_device(device):
 
     p_bar = tqdm(range(max_iterations - 1), desc="Gradient Flow Progress")
@@ -84,7 +86,7 @@ def run_gradient_flow(
             )
         # Generate key and samples for evaluation
         key, subkey = jax.random.split(key)
-        z_samples_eval = jax.random.normal(subkey, (n_samples, 2))
+        z_samples_eval = jax.random.normal(subkey, (N_samples, current_parametric_model.problem_dimension))
         # Perform gradient flow step
         current_parametric_model, step_info = gradient_flow_step(
             current_parametric_model,
@@ -108,6 +110,8 @@ def run_gradient_flow(
             sum(jax.tree.leaves(jax.tree.map(lambda x: jnp.sum(x**2), current_params)))
         )
         param_norms.append(float(param_norm))
+        euclid_grad_norm_history.append(step_info["gradient_norm"])
+        riemann_grad_norm_history.append(step_info["riemann_gradient_norm"])
 
         p_bar.set_postfix(
             {
@@ -256,6 +260,8 @@ def run_gradient_flow(
     return {
         "final_parametric_model": current_parametric_model,
         "energy_history": energy_history,
+        "euclid_grad_norm_history": euclid_grad_norm_history,
+        "riemann_grad_norm_history": riemann_grad_norm_history,
         "param_norms": param_norms,
         "sample_history": sample_history,
         "potential": potential,

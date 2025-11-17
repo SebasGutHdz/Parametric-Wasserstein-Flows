@@ -33,12 +33,13 @@ def anderson_step(
     z_samples: Array,
     step_size: float = 0.01,
     memory_size: int = 5,
-    mixing_parameter: float = 1.0,
+    relaxation: float = 1.0,
     anderson_tol: float = 1e-6,
     solver: str = "minres",
     solver_tol: float = 1e-6,
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
+    l2_reg_gamma: float = 1e-6,
 ) -> Tuple[PyTree, List[PyTree], List[PyTree], Dict]:
     """
     Anderson acceleration step for fixed-point iteration.
@@ -118,7 +119,11 @@ def anderson_step(
 
     # Solve Anderson subproblem to get mixing coefficients
     gamma = compute_anderson_gamma(
-        r_n, residual_diff, G_mat, z_samples, tol=anderson_tol
+        r_n,
+        residual_diff,
+        G_mat,
+        z_samples,
+        l2_regularization=l2_reg_gamma,
     )
 
     # Compute mixed residuals \bar{r}_n
@@ -128,7 +133,7 @@ def anderson_step(
             lambda a, b: a - gamma_i * b, mixed_residual, residual_diff[i]
         )
     # Compute parameter update delta theta_n
-    delta_theta_n = jax.tree.map(lambda x: mixing_parameter * x, mixed_residual)
+    delta_theta_n = jax.tree.map(lambda x: relaxation * x, mixed_residual)
     for i, gamma_i in enumerate(gamma):
         delta_theta_n = jax.tree.map(
             lambda step, dx: step - gamma_i * dx, delta_theta_n, param_diff[i]
@@ -156,8 +161,7 @@ def anderson_step(
     new_param_diff = ([delta_theta_n] + param_diff)[:memory_size]
     new_residual_diff = ([delta_r_new] + residual_diff)[:memory_size]
 
-    graphdef, _ = nnx.split(parametric_model)
-    parametric_model = nnx.merge(graphdef, theta_new)
+    parametric_model = nnx.update(parametric_model, theta_new)
 
     return (
         new_params_history,
@@ -219,18 +223,20 @@ def compute_anderson_gamma(
     G_mat: G_matrix,
     z_samples: Array,
     tol: float = 1e-6,
+    l2_regularization: float = 1e-6,
 ) -> Tuple[List[float], Dict]:
     """
     Solve Anderson mixing optimization using G-matrix norm:
+
     Args:
         current_residual: Current fixed-point residual r_k
         residual_differences: List of previous residual differences (r_{i+1} - r_i)
         G_mat: G_matrix object to compute inner products
         z_samples: Reference samples (batch_size, d)
-        tol: Tolerance for the linear solver
+        l2_regularization: needed to bound the mixing coefficients
+
     Returns:
         gamma: Coefficients for Anderson mixing
-        info: Dictionary with solver information
     """
     m = len(residual_differences)
 
@@ -253,9 +259,12 @@ def compute_anderson_gamma(
         b = b.at[i].set(
             G_mat.inner_product(current_residual, residual_differences[i], z_samples)
         )
-
+    # Add l2 regulzarization
+    A = A + jnp.eye(A.shape[0]) * l2_regularization
     # Solve the linear system A gamma = b
-    gamma, info = minres(A_func=lambda x: jnp.dot(A, x), b=b, tol=tol, maxiter=100)
+    # gamma, info = minres(A_func=lambda x: jnp.dot(A, x), b=b, tol=tol, maxiter=100)
+    # for small dim < 15 direct solve should be better
+    gamma = jnp.linalg.solve(A, b)
     # converged = info.get('success', False)
 
     return gamma.tolist()  # , {'converged': converged}

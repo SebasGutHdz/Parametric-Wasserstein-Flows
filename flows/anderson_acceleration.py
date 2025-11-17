@@ -31,13 +31,16 @@ def anderson_method(
     n_iterations: int = 100,
     step_size: float = 0.01,
     memory_size: int = 5,
-    mixing_parameter: float = 1.0,
+    relaxation: float = 1.0,
     anderson_tol: float = 1e-6,
     solver: str = "minres",
     solver_tol: float = 1e-6,
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
+    l2_reg_gamma: float = 1e-6,
     convergence_tol: float = 1e-6,
+    plot_intermediate=False,
+    save_param_trajectory=False,
 ) -> Tuple[PyTree, Dict]:
     """
     Anderson-accelerated gradient flow method for Wasserstein gradient flow.
@@ -103,7 +106,7 @@ def anderson_method(
     print(f"  n_iterations: {n_iterations}")
     print(f"  step_size: {step_size}")
     print(f"  memory_size: {memory_size}")
-    print(f"  mixing_parameter: {mixing_parameter}")
+    print(f"  mixing_parameter: {relaxation}")
     print("-" * 60)
 
     for iteration in range(n_iterations):
@@ -122,12 +125,13 @@ def anderson_method(
             z_samples=z_samples,
             step_size=step_size,
             memory_size=memory_size,
-            mixing_parameter=mixing_parameter,
+            relaxation=relaxation,
             anderson_tol=anderson_tol,
             solver=solver,
             solver_tol=solver_tol,
             solver_maxiter=solver_maxiter,
             regularization=regularization,
+            l2_reg_gamma=l2_reg_gamma,
         )
 
         # Extract new parameters (newest in history)
@@ -138,8 +142,8 @@ def anderson_method(
         residual_norm_sq = G_mat.inner_product(
             current_residual, current_residual, test_data_set
         )
-        if residual_norm_sq > 0:
-            residual_norm = jnp.sqrt(residual_norm_sq)
+        if residual_norm_sq >= -1e-10:  # some tolerance for numerical error
+            residual_norm = jnp.sqrt(jnp.maximum(residual_norm_sq, 0.0))
         else:
             raise ValueError("Non-positive residual norm squared")
 
@@ -151,7 +155,11 @@ def anderson_method(
         )
 
         # Store trajectory information
-        params_trajectory.append(current_params)
+        if save_param_trajectory or len(params_trajectory) == 1:
+            params_trajectory.append(current_params)
+        else:
+            params_trajectory[-1] = current_params
+
         residual_norms.append(float(residual_norm))
         energy_trajectory.append(float(energy))
 
@@ -162,18 +170,19 @@ def anderson_method(
                 f"Energy: {energy:12.6e} | "
                 f"Residual: {residual_norm:12.6e} | "
             )
-            # Display current samples of current model
-            plt.figure(figsize=(6, 6))
-            plt.scatter(
-                x_samples[:, 0], x_samples[:, 1], alpha=0.5, label="Model Samples"
-            )
-            plt.title(f"Samples at Iteration {iteration}")
-            plt.xlabel("x1")
-            plt.ylabel("x2")
-            plt.axis("equal")
-            plt.legend()
-            plt.grid(True)
-            plt.show()
+            if plot_intermediate:
+                # Display current samples of current model
+                plt.figure(figsize=(6, 6))
+                plt.scatter(
+                    x_samples[:, 0], x_samples[:, 1], alpha=0.5, label="Model Samples"
+                )
+                plt.title(f"Samples at Iteration {iteration}")
+                plt.xlabel("x1")
+                plt.ylabel("x2")
+                plt.axis("equal")
+                plt.legend()
+                plt.grid(True)
+                plt.show()
 
         # Check convergence
         if residual_norm < convergence_tol:
@@ -196,6 +205,7 @@ def anderson_method(
     history = {
         "params": params_trajectory,
         "residual_norms": residual_norms,
+        "riemann_grad_history": [_r / step_size for _r in residual_norms],
         "energies": energy_trajectory,
         "final_iteration": iteration if converged else n_iterations - 1,
         "param_history": param_history,

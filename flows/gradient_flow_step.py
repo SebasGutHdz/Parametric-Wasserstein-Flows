@@ -14,10 +14,12 @@ import jax
 from jax import Device
 
 from geometry.G_matrix import G_matrix
-
 from functionals.functional import Potential
+from core.utility import _params_scalar_product
 
 from tqdm import tqdm
+
+from operator import add
 
 
 def move_to_device(pytree: Any, device) -> Any:
@@ -91,6 +93,8 @@ def gradient_flow_step(
     grad_norm = jnp.sqrt(
         sum(jax.tree.leaves(jax.tree.map(lambda x: jnp.sum(x**2), energy_grad)))
     )
+    riemannian_grad_norm_sq = _params_scalar_product(energy_grad, eta)
+    riemann_grad_norm = jnp.sqrt(jnp.maximum(riemannian_grad_norm_sq, 0.0))
     eta_norm = jnp.sqrt(
         sum(jax.tree.leaves(jax.tree.map(lambda x: jnp.sum(x**2), eta)))
     )
@@ -100,6 +104,7 @@ def gradient_flow_step(
 
     step_info = {
         "gradient_norm": grad_norm,
+        "riemann_gradient_norm": riemann_grad_norm,
         "eta_norm": eta_norm,
         "param_norm": param_norm,
         "energy": energy,
