@@ -13,6 +13,20 @@ from flax import nnx
 from functionals.linear_funcitonal_class import LinearPotential
 
 
+def get_gaussian_potential(mean: Array, Sigma_inv: Array = None) -> Callable:
+    if Sigma_inv is None:
+        Sigma_inv = jnp.eye(mean.shape[0])
+    assert (
+        mean.shape[0] == Sigma_inv.shape[0] and Sigma_inv.shape[0] == Sigma_inv.shape[1]
+    )
+
+    def _potential(x: Array) -> Array:
+        x_c = x - mean
+        return 0.5 * jnp.einsum("...i,ij,...j", x_c, Sigma_inv, x_c)
+
+    return _potential
+
+
 # Define specific potential functions
 @jax.jit
 def quadratic_potential_fn(x: Array) -> Array:
