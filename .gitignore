@@ -166,3 +166,4 @@ cython_debug/
 # outputs
 *.gif
 *.pdf
+*.pkl
