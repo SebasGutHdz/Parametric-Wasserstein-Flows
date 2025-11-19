@@ -18,6 +18,7 @@ from geometry.G_matrix import G_matrix
 from functionals.functional import Potential
 from flows.gradient_flow_step import gradient_flow_step
 from parametric_model.parametric_model import ParametricModel
+from flows.visualization import plot_gradient_flow
 
 
 from tqdm import tqdm
@@ -135,99 +136,16 @@ def run_gradient_flow(
                 f"Grad norm: {step_info['gradient_norm']:.2e}"
             )
 
-            fig = plt.figure(figsize=(12, 5))
 
-            # 3D view
-            ax3d = fig.add_subplot(1, 2, 1, projection="3d")
-
-            # Get potential surface for region around particles
-            all_samples = jnp.vstack([samples0, samples1])
-            x_range = jnp.linspace(
-                all_samples[:, 0].min() - 0.5, all_samples[:, 0].max() + 0.5, 100
-            )
-            y_range = jnp.linspace(
-                all_samples[:, 1].min() - 0.5, all_samples[:, 1].max() + 0.5, 100
-            )
-            X, Y = jnp.meshgrid(x_range, y_range)
-            # Z = jnp.array([[potential.potential_fn(x, y, **potential.potential_kwargs) for x in x_range] for y in y_range])
-            Z = potential.linear.potential_fn(
-                jnp.stack([X.ravel(), Y.ravel()], axis=-1),
-                **potential.linear.potential_kwargs,
-            ).reshape(X.shape)
-
-            # Plot surface
-            ax3d.plot_surface(X, Y, Z, alpha=0.4, cmap="viridis")
-
-            # Particles on surface (elevated by potential)
-            # surface_z0 = jnp.array([potential.potential_fn(x, y, **potential.potential_kwargs) for x, y in samples0])
-            # surface_z1 = jnp.array([potential.potential_fn(x, y, **potential.potential_kwargs) for x, y in samples1])
-            surface_z0 = potential.linear.potential_fn(
-                samples0, **potential.linear.potential_kwargs
-            )
-            surface_z1 = potential.linear.potential_fn(
-                samples1, **potential.linear.potential_kwargs
-            )
-
-            ax3d.scatter(
-                samples0[:, 0],
-                samples0[:, 1],
-                surface_z0,
-                c="green",
-                s=10,
-                alpha=0.6,
-                label=f"Iteration {iteration-progress_every}",
-            )
-            ax3d.scatter(
-                samples1[:, 0],
-                samples1[:, 1],
-                surface_z1,
-                c="red",
-                s=10,
-                alpha=0.8,
-                label=f"Iteration {iteration}",
-            )
-
-            # Particles on contour (base level)
-            base_z = Z.min() - 0.15 * (Z.max() - Z.min())
-            ax3d.scatter(
-                samples0[:, 0], samples0[:, 1], base_z, c="lightgreen", s=5, alpha=0.4
-            )
-            ax3d.scatter(
-                samples1[:, 0], samples1[:, 1], base_z, c="pink", s=5, alpha=0.4
-            )
-
-            ax3d.set_xlabel("X")
-            ax3d.set_ylabel("Y")
-            ax3d.set_zlabel("Potential")
-            ax3d.set_title(f"3D View - Energy = {current_energy:.6f}")
-            ax3d.legend()
-
-            # 2D contour view (similar to original)
-            ax2d = fig.add_subplot(1, 2, 2)
-            ax2d = potential.linear.plot_function(fig=fig, ax=ax2d)
-            ax2d.scatter(
-                samples0[:, 0],
-                samples0[:, 1],
-                color="green",
-                s=5,
-                alpha=0.6,
-                label=f"Iteration {iteration-progress_every}",
-            )
-            ax2d.scatter(
-                samples1[:, 0],
-                samples1[:, 1],
-                color="red",
-                s=5,
-                alpha=0.8,
-                label=f"Iteration {iteration}",
-            )
-            ax2d.set_title(f"Contour View - Iteration {iteration}")
-            ax2d.legend()
-
-            plt.tight_layout()
-            plt.show()
-            plt.close(fig)
-            # Update previous samples
+            try: 
+                fig = plot_gradient_flow(samples0, samples1, potential, current_energy, iteration, progress_every)
+                plt.tight_layout()
+                plt.show()
+                plt.close(fig)
+                # Update previous samples
+            except Exception as e:
+                print("PLotting failed due to the folowwing error:")
+                print(e)
             samples0 = samples1
         if iteration == 0:
             _, samples0, _, _, _ = potential.evaluate_energy(
