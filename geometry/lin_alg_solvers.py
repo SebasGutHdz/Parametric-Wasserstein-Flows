@@ -45,6 +45,28 @@ def linear_combination(vs: List[PyTree], coeffs: Array) -> PyTree:
         out = add_trees(out, scale_tree(vj, coeffs[j]))
     return out
 
+def reg_minres(A_func: Callable, b: PyTree, epsilon: float = 1e-4, tol: float = 1e-6, x0: Optional[PyTree] = None, maxiter: int = 100) -> Tuple[PyTree, dict]:
+    """
+    Regularized MINRES: solves (A + εI)·x = b for symmetric A
+
+    Args:
+        A_func: Function that computes A·x (A must be symmetric)
+        b: Right-hand side
+        epsilon: Regularization parameter (makes A + εI positive definite)
+        tol: Convergence tolerance
+        x0: Initial guess
+        maxiter: Maximum iterations
+
+    Returns:
+        x: Solution
+        info: Solver information
+    """
+    def regu_A(x: PyTree) -> PyTree:
+        return jax.tree.map(lambda ax, xx: ax + epsilon * xx, A_func(x), x)
+
+    return minres(regu_A, b, tol=tol, x0=x0, maxiter=maxiter)
+
+
 def minres(
     A_func: Callable[[PyTree], PyTree],
     b: PyTree,

@@ -78,24 +78,27 @@ def anderson_step(
             step_size=step_size,
             solver=solver,
             solver_tol=solver_tol,
-            solver_maxiter=10,
+            solver_maxiter=solver_maxiter,
             regularization=regularization,
             only_return_params=True
         )
         r_0 = compute_fixed_point_residual(
             parametric_model, current_params, G_mat, potential, z_samples,
-            step_size, solver, solver_tol, regularization
+            step_size, solver, solver_tol, regularization, solver_maxiter
         )
         r_1 = compute_fixed_point_residual(
             parametric_model, theta_1, G_mat, potential, z_samples,
-            step_size, solver, solver_tol, regularization
+            step_size, solver, solver_tol, regularization, solver_maxiter
         )
         # Compute difference for theta and residuals
+        # delta_theta_0 = theta_1 - theta_0 (new - old)
         delta_theta_0 = jax.tree.map(lambda a,b: b - a, current_params, theta_1)
+        # delta_r_0 = r_1 - r_0 (new - old)
         delta_r_0 = jax.tree.map(lambda a,b: b - a, r_0, r_1)
+        # Return with theta_1 FIRST (index 0 = current), theta_0 SECOND (index 1 = previous)
         return (
-            [theta_1,current_params],
-            [r_1,r_0],
+            [theta_1, current_params],
+            [r_1, r_0],
             [delta_theta_0],
             [delta_r_0]
         )
@@ -110,19 +113,23 @@ def anderson_step(
     gamma = compute_anderson_gamma(
         r_n, residual_diff, G_mat, z_samples, tol=anderson_tol)
     
-    # Compute mixed residuals \bar{r}_n
+    # Compute mixed residuals \bar{r}_n = r_n - Σ γᵢ·Δrᵢ
     mixed_residual = r_n
     for i,gamma_i in enumerate(gamma):
         mixed_residual = jax.tree.map(
-            lambda a, b: a - gamma_i * b, 
-            mixed_residual, 
+            lambda a, b: a - gamma_i * b,
+            mixed_residual,
             residual_diff[i]
         )
-    # Compute parameter update delta theta_n
+
+    # Compute parameter update using Anderson mixing (Eq 2.1.8):
+    # Δθ_n = -XkΓk + β·r̄_n
+    # Start with the mixed residual term: β·r̄_n
     delta_theta_n = jax.tree.map(
         lambda x: mixing_parameter * x, mixed_residual
     )
-    for i , gamma_i in enumerate(gamma):
+    # Subtract the history term: -Σ γᵢ·Δθᵢ
+    for i, gamma_i in enumerate(gamma):
         delta_theta_n = jax.tree.map(
             lambda step, dx: step - gamma_i * dx,
             delta_theta_n,
@@ -134,11 +141,13 @@ def anderson_step(
     # Compute new residual
     r_new = compute_fixed_point_residual(
         parametric_model, theta_new, G_mat, potential, z_samples,
-        step_size, solver, solver_tol, regularization
+        step_size, solver, solver_tol, regularization, solver_maxiter
     )
-    # Compute new residual difference
+    # Compute new residual difference: delta_r_new = r_new - r_n
     delta_r_new = jax.tree.map(lambda a,b: b - a, r_n, r_new)
-    # Update histores
+    # Update histories
+    # Prepend new values and keep at most memory_size+1 entries for histories
+    # and memory_size entries for differences
     new_params_history = ([theta_new] + param_history)[:memory_size+1]
     new_residual_history = ([r_new] + residual_history)[:memory_size+1]
     new_param_diff = ([delta_theta_n] + param_diff)[:memory_size]
@@ -165,7 +174,8 @@ def compute_fixed_point_residual(
         step_size: float,
         solver: str,
         solver_tol: float,
-        regularization: float
+        regularization: float,
+        solver_maxiter: int = 50
     ) -> PyTree:
     '''
     Compute fixed point residual r = -h * G^{-1} grad F(p) for parameters p
@@ -189,7 +199,7 @@ def compute_fixed_point_residual(
     eta, solver_info = G_mat.solve_system(z_samples, energy_grad,
                                             params=params,
                                             tol=solver_tol, 
-                                            maxiter=50,
+                                            maxiter=solver_maxiter,
                                             method=solver,
                                             regularization=regularization)
     # Fixed point residual
@@ -202,7 +212,8 @@ def compute_anderson_gamma(
     residual_differences: List[PyTree], 
     G_mat: G_matrix,
     z_samples: Array,
-    tol: float = 1e-6
+    tol: float = 1e-6,
+    regularization: float  = 1e-3
 ) -> Tuple[List[float], Dict]:
     """
     Solve Anderson mixing optimization using G-matrix norm:
@@ -235,6 +246,7 @@ def compute_anderson_gamma(
                     z_samples
                 )
             )
+        A  = A.at[i,i].add(regularization)
         # b_i = ⟨r_n, Δr_i⟩_G
         b = b.at[i].set(
             G_mat.inner_product(

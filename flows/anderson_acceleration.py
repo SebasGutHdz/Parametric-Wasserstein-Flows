@@ -37,7 +37,9 @@ def anderson_method(
         solver_tol: float = 1e-6,
         solver_maxiter: int = 50,
         regularization: float = 1e-6,
-        convergence_tol: float = 1e-6
+        convergence_tol: float = 1e-6,
+        verbose: bool = True,
+        freq_print: int = 10
     ) -> Tuple[PyTree, Dict]:
     '''
     Anderson-accelerated gradient flow method for Wasserstein gradient flow.
@@ -159,7 +161,7 @@ def anderson_method(
         energy_trajectory.append(float(energy))
         
         # Print progress
-        if iteration % 10 == 0 or iteration < 5:
+        if verbose and iteration % freq_print == 0:
             print(f"Iter {iteration:4d} | "
                   f"Energy: {energy:12.6e} | "
                   f"Residual: {residual_norm:12.6e} | ")

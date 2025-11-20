@@ -12,7 +12,7 @@ from jaxtyping import PyTree,Array
 from functools import partial
 from jax.scipy.sparse.linalg import gmres
 from flax import nnx
-from geometry.lin_alg_solvers import minres,reg_cg
+from geometry.lin_alg_solvers import minres, reg_cg, reg_minres
 
 class G_matrix:
     '''
@@ -95,11 +95,11 @@ class G_matrix:
         if method not in ["cg","gmres","minres"]:
             raise ValueError(f"Unknown method: {method}")
         if method == "cg":
-            solver = lambda matvec,b,tol,maxiter,x0: reg_cg(matvec,b,epsilon=regularization,tol=tol,maxiter=maxiter,x0 = x0)
+            solver = lambda matvec,b,tol,maxiter,x0: reg_cg(matvec, b, epsilon=regularization, tol=tol, maxiter=maxiter, x0=x0)
         elif method == "gmres":
             solver = gmres
         elif method == "minres":
-            solver = minres
+            solver = lambda matvec,b,tol,maxiter,x0: reg_minres(matvec, b, epsilon=regularization, tol=tol, maxiter=maxiter, x0=x0)
         if params is None:
             _,params = nnx.split(self.mapping)
         # Define the linear operator for G(theta)
