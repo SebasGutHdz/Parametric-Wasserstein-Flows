@@ -77,7 +77,7 @@ def run_gradient_flow(
     key = jax.random.PRNGKey(0)
     # with jax.default_device(device):
 
-    p_bar = tqdm(range(max_iterations - 1), desc="Gradient Flow Progress")
+    p_bar = tqdm(range(max_iterations), desc="Gradient Flow Progress")
 
     for iteration in p_bar:
 
@@ -87,7 +87,9 @@ def run_gradient_flow(
             )
         # Generate key and samples for evaluation
         key, subkey = jax.random.split(key)
-        z_samples_eval = jax.random.normal(subkey, (N_samples, current_parametric_model.problem_dimension))
+        z_samples_eval = jax.random.normal(
+            subkey, (N_samples, current_parametric_model.problem_dimension)
+        )
         # Perform gradient flow step
         current_parametric_model, step_info = gradient_flow_step(
             current_parametric_model,
@@ -136,9 +138,15 @@ def run_gradient_flow(
                 f"Grad norm: {step_info['gradient_norm']:.2e}"
             )
 
-
-            try: 
-                fig = plot_gradient_flow(samples0, samples1, potential, current_energy, iteration, progress_every)
+            try:
+                fig = plot_gradient_flow(
+                    samples0,
+                    samples1,
+                    potential,
+                    current_energy,
+                    iteration,
+                    progress_every,
+                )
                 plt.tight_layout()
                 plt.show()
                 plt.close(fig)
@@ -148,6 +156,7 @@ def run_gradient_flow(
                 print(e)
             samples0 = samples1
         if iteration == 0:
+            # for plotting sample at previous checkpoint vs current
             _, samples0, _, _, _ = potential.evaluate_energy(
                 current_parametric_model, z_samples, current_params
             )
@@ -163,8 +172,14 @@ def run_gradient_flow(
             print(f"Energy increment below tolerance at {iteration}")
             break
 
+    # eval energy of the final iterate
+    final_energy, samples0, _, _, _ = potential.evaluate_energy(
+        current_parametric_model,
+        z_samples,
+    )
+
     # Final summary
-    final_energy = energy_history[-1]
+    energy_history.append(final_energy)
     total_decrease = energy_history[0] - final_energy
 
     print(f"\n=== Integration Complete ===")
