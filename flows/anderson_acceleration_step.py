@@ -248,7 +248,7 @@ def compute_anderson_gamma(
     b = jnp.zeros((m,))
 
     for i in range(m):
-        for j in range(m):
+        for j in range(i, m):
             # A_ij = ⟨Δr_i, Δr_j⟩_G
             A = A.at[i, j].set(
                 G_mat.inner_product(
@@ -259,6 +259,7 @@ def compute_anderson_gamma(
         b = b.at[i].set(
             G_mat.inner_product(current_residual, residual_differences[i], z_samples)
         )
+    A = 0.5*(A + A.T)
     # Add l2 regulzarization
     A = A + jnp.eye(A.shape[0]) * l2_regularization
     # Solve the linear system A gamma = b
