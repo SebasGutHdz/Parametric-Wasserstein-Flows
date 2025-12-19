@@ -109,6 +109,14 @@ def anderson_method(
     print(f"  mixing_parameter: {relaxation}")
     print("-" * 60)
 
+    # evaluate initial energy
+    key, subkey = jax.random.split(key)
+    z_samples = jax.random.normal(subkey, (batch_size, problem_dim))
+    energy_init, _, _, _, _ = potential.evaluate_energy(
+        parametric_model, z_samples=z_samples
+    )
+    energy_trajectory.append(float(energy_init))
+
     for iteration in range(n_iterations):
         key, subkey = jax.random.split(key)
         z_samples = jax.random.normal(subkey, (batch_size, problem_dim))
@@ -133,6 +141,15 @@ def anderson_method(
             regularization=regularization,
             l2_reg_gamma=l2_reg_gamma,
         )
+
+        if iteration == 0:
+            init_params = param_history[-1]
+            init_residual = residual_history[-1]
+            init_res_norm_sq = G_mat.inner_product(
+                init_residual, init_residual, z_samples, init_params
+            )
+
+            residual_norms.append(jnp.sqrt(jnp.maximum(init_res_norm_sq, 0.0)))
 
         # Extract new parameters (newest in history)
         current_params = param_history[0]
