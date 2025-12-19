@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flax import nnx
 from jaxtyping import Array, PyTree
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict, Optional, Literal
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jla
@@ -39,7 +39,9 @@ def anderson_step(
     solver_tol: float = 1e-6,
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
-    l2_reg_gamma: float = 1e-6,
+    regularization_factor_gamma: float = 1e-6,
+    regularization_method_gamma: float = 1e-6,
+    ensure_descent: bool = False,
 ) -> Tuple[PyTree, List[PyTree], List[PyTree], Dict]:
     """
     Anderson acceleration step for fixed-point iteration.
@@ -123,7 +125,9 @@ def anderson_step(
         residual_diff,
         G_mat,
         z_samples,
-        l2_regularization=l2_reg_gamma,
+        regularization_factor=regularization_factor_gamma,
+        regularization_method=regularization_method_gamma,
+        parameter_differences=param_diff,
     )
 
     # Compute mixed residuals \bar{r}_n
@@ -139,6 +143,10 @@ def anderson_step(
             lambda step, dx: step - gamma_i * dx, delta_theta_n, param_diff[i]
         )
     # Update parameters
+
+    if ensure_descent and G_mat.inner_product(delta_theta_n, r_n, z_samples) < -0.0:
+        delta_theta_n = jax.tree.map(lambda x: x, r_n)
+
     theta_new = jax.tree.map(lambda p, d: p + d, current_params, delta_theta_n)
 
     # Compute new residual
@@ -223,7 +231,9 @@ def compute_anderson_gamma(
     G_mat: G_matrix,
     z_samples: Array,
     tol: float = 1e-6,
-    l2_regularization: float = 1e-6,
+    regularization_factor: float = 1e-3,
+    regularization_method: Literal["l2", "adaptive"] = "l2",
+    parameter_differences: List[PyTree] = None,
 ) -> Tuple[List[float], Dict]:
     """
     Solve Anderson mixing optimization using G-matrix norm:
@@ -238,6 +248,11 @@ def compute_anderson_gamma(
     Returns:
         gamma: Coefficients for Anderson mixing
     """
+
+    assert (
+        regularization_method == "adaptive" and parameter_differences is not None
+    ) or regularization_method == "l2"
+
     m = len(residual_differences)
 
     if m == 0:
@@ -245,6 +260,7 @@ def compute_anderson_gamma(
 
     # Build least-squares system: A γ = b
     A = jnp.zeros((m, m))
+    M_reg = jnp.eye(m)
     b = jnp.zeros((m,))
 
     for i in range(m):
@@ -259,9 +275,23 @@ def compute_anderson_gamma(
         b = b.at[i].set(
             G_mat.inner_product(current_residual, residual_differences[i], z_samples)
         )
-    A = 0.5*(A + A.T)
+    if regularization_method == "adaptive":
+        for i in range(m):
+            for j in range(i, m):
+                # A_ij = ⟨Δr_i, Δr_j⟩_G
+                M_reg = M_reg.at[i, j].set(
+                    G_mat.inner_product(
+                        parameter_differences[i], parameter_differences[j], z_samples
+                    )
+                )
+        r_cur_norm_sq = G_mat.inner_product(
+            current_residual, current_residual, z_samples
+        )
+        delta_x_norm_sq = M_reg[0, 0]
+        regularization_factor = 1e-2 * r_cur_norm_sq / (delta_x_norm_sq + 1e-8)
     # Add l2 regulzarization
-    A = A + jnp.eye(A.shape[0]) * l2_regularization
+    A = A + M_reg * regularization_factor
+    A = A + A.T - jnp.diag(A.diagonal())
     # Solve the linear system A gamma = b
     # gamma, info = minres(A_func=lambda x: jnp.dot(A, x), b=b, tol=tol, maxiter=100)
     # for small dim < 15 direct solve should be better

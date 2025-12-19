@@ -37,10 +37,12 @@ def anderson_method(
     solver_tol: float = 1e-6,
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
-    l2_reg_gamma: float = 1e-6,
     convergence_tol: float = 1e-6,
     plot_intermediate=False,
     save_param_trajectory=False,
+    regularization_factor_gamma: float = 1e-6,
+    regularization_method_gamma: float = 1e-6,
+    ensure_descent: bool=False,
 ) -> Tuple[PyTree, Dict]:
     """
     Anderson-accelerated gradient flow method for Wasserstein gradient flow.
@@ -139,7 +141,9 @@ def anderson_method(
             solver_tol=solver_tol,
             solver_maxiter=solver_maxiter,
             regularization=regularization,
-            l2_reg_gamma=l2_reg_gamma,
+            regularization_factor_gamma=regularization_factor_gamma,
+            regularization_method_gamma=regularization_method_gamma,
+            ensure_descent=ensure_descent,
         )
 
         if iteration == 0:
