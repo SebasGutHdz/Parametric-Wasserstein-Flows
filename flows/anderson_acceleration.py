@@ -39,6 +39,7 @@ def anderson_method(
     regularization: float = 1e-6,
     convergence_tol: float = 1e-6,
     plot_intermediate=False,
+    plot_frequency: int = 10,
     save_param_trajectory=False,
     regularization_factor_gamma: float = 1e-6,
     regularization_method_gamma: float = 1e-6,
@@ -185,7 +186,7 @@ def anderson_method(
         energy_trajectory.append(float(energy))
 
         # Print progress
-        if iteration % 10 == 0 or iteration < 5:
+        if iteration % plot_frequency == 0 or iteration < 5:
             print(
                 f"Iter {iteration:4d} | "
                 f"Energy: {energy:12.6e} | "
