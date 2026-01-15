@@ -61,7 +61,7 @@ class MLP(nnx.Module):
 
         activation_fn = str_to_act_fn(activation_fn)
 
-        layers = []
+        layers = nnx.List()
 
         in_dim = din
 
@@ -159,7 +159,7 @@ class ResNet(nnx.Module):
 
         # activation_fn = str_to_act_fn(activation_fn)
 
-        layers = []
+        layers = nnx.List
 
         in_dim = din
 
