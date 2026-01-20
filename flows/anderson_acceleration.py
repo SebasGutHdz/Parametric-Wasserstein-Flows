@@ -193,6 +193,9 @@ def anderson_method(
                 f"Residual: {residual_norm:12.6e} | "
             )
             if plot_intermediate:
+                if iteration == 0:
+                    x_max = jnp.max(jnp.abs(x_samples[:,0])) * 1.1
+                    y_max = jnp.max(jnp.abs(x_samples[:,1])) * 1.1
                 # Display current samples of current model
                 plt.figure(figsize=(6, 6))
                 plt.scatter(
@@ -201,6 +204,8 @@ def anderson_method(
                 plt.title(f"Samples at Iteration {iteration}")
                 plt.xlabel("x1")
                 plt.ylabel("x2")
+                plt.xlim(-x_max, x_max)
+                plt.ylim(-y_max, y_max) 
                 plt.axis("equal")
                 plt.legend()
                 plt.grid(True)
