@@ -208,7 +208,7 @@ def compute_fixed_point_residual(
         energy_grad,
         params=params,
         tol=solver_tol,
-        maxiter=50,
+        maxiter=10,
         method=solver,
         regularization=regularization,
     )

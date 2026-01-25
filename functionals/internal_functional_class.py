@@ -36,6 +36,8 @@ class InternalPotential:
         Args:
             functional: Type of functional, either 'entropy','fisher' or ['entropy','fisher']
             coeff: Coefficient for the functional
+            sigma: float
+            method: entropy -> exact, hutchinson, fisher -> exact,autodiff
         """
         if type(functional) == str:
             functional = [functional]

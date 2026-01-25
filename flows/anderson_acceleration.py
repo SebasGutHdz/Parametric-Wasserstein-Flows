@@ -16,6 +16,7 @@ from jax import Device
 from geometry.G_matrix import G_matrix
 from geometry.lin_alg_solvers import minres
 from flows.anderson_acceleration_step import anderson_step
+from flows.visualization import plot_gradient_flow
 
 from functionals.functional import Potential
 from parametric_model.parametric_model import ParametricModel
@@ -110,11 +111,11 @@ def anderson_method(
     print(f"  mixing_parameter: {relaxation}")
     print("-" * 60)
 
-    # evaluate initial energy
+    # evaluate initial energy and get initial samples for plotting
     key, subkey = jax.random.split(key)
     z_samples = jax.random.normal(subkey, (batch_size, problem_dim))
-    energy_init, _, _, _, _ = potential.evaluate_energy(
-        parametric_model, z_samples=z_samples
+    energy_init, samples_prev, _, _, _ = potential.evaluate_energy(
+        parametric_model, z_samples=test_data_set
     )
     energy_trajectory.append(float(energy_init))
 
@@ -189,23 +190,23 @@ def anderson_method(
                 f"Residual: {residual_norm:12.6e} | "
             )
             if plot_intermediate:
-                if iteration == 0:
-                    x_max = jnp.max(jnp.abs(x_samples[:,0])) * 1.1
-                    y_max = jnp.max(jnp.abs(x_samples[:,1])) * 1.1
-                # Display current samples of current model
-                plt.figure(figsize=(6, 6))
-                plt.scatter(
-                    x_samples[:, 0], x_samples[:, 1], alpha=0.5, label="Model Samples"
-                )
-                plt.title(f"Samples at Iteration {iteration}")
-                plt.xlabel("x1")
-                plt.ylabel("x2")
-                plt.xlim(-x_max, x_max)
-                plt.ylim(-y_max, y_max) 
-                plt.axis("equal")
-                plt.legend()
-                plt.grid(True)
-                plt.show()
+                try:
+                    fig = plot_gradient_flow(
+                        samples_prev,
+                        x_samples,
+                        potential,
+                        energy,
+                        iteration,
+                        plot_frequency,
+                    )
+                    plt.tight_layout()
+                    plt.show()
+                    plt.close(fig)
+                except Exception as e:
+                    print("Plotting failed due to the following error:")
+                    print(e)
+                # Update previous samples for next plot
+                samples_prev = x_samples
 
         # Check convergence
         if residual_norm < convergence_tol:
