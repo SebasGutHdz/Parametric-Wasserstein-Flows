@@ -119,7 +119,7 @@ class LinearPotential:
         else:
             return jnp.mean(potential_values), None
 
-    def plot_function(self, fig=None, ax=None, x_bds=None, y_bds=None):
+    def plot_function(self, fig=None, ax=None, x_bds=None, y_bds=None, fill=True, **kwargs_plot):
         """
         Plot the potential function U(x) over the defined boundaries.
         """
@@ -137,7 +137,10 @@ class LinearPotential:
         )
         Z = Z.reshape(X.shape)
 
-        contour = ax.contourf(X, Y, Z, levels=100, cmap="cividis", alpha=0.5)
+        default_kwargs = dict(levels=100, cmap="cividis", alpha=0.5)
+        kwargs_plot = default_kwargs | kwargs_plot
+
+        contour = ax.contourf(X, Y, Z, **kwargs_plot) if fill else ax.contour(X, Y, Z, **kwargs_plot) 
         fig.colorbar(contour)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
