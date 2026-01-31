@@ -80,7 +80,7 @@ def anderson_step(
             step_size=step_size,
             solver=solver,
             solver_tol=solver_tol,
-            solver_maxiter=10,
+            solver_maxiter=50,
             regularization=regularization,
             only_return_params=True,
         )
@@ -208,7 +208,7 @@ def compute_fixed_point_residual(
         energy_grad,
         params=params,
         tol=solver_tol,
-        maxiter=10,
+        maxiter=50,
         method=solver,
         regularization=regularization,
     )

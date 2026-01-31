@@ -34,7 +34,7 @@ def anderson_method(
     memory_size: int = 5,
     relaxation: float = 1.0,
     anderson_tol: float = 1e-6,
-    solver: str = "minres",
+    solver: str = "cg",
     solver_tol: float = 1e-6,
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
