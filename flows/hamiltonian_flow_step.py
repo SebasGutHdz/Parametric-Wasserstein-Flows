@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flax import nnx
 from jaxtyping import Array, PyTree
-from typing import Tuple, Any, Union
+from typing import Tuple, Any, Union, Optional
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -39,6 +39,8 @@ def hamiltonian_flow_step(
     gamma: float = 1e-2,
     n_iters: int = 3,
     only_return_params: bool = False,
+    graphdef: Optional[nnx.GraphDef] = None,
+    current_params: Optional[PyTree] = None,
 ) -> Tuple[Union[nnx.Module, PyTree], dict]:
     """
     Generic hamiltonian flow step that works with any Potential
@@ -66,8 +68,10 @@ def hamiltonian_flow_step(
         step_info: Dictionary with step diagnostics
     """
 
-    # Get architecture and current parameters
-    graph_def, theta_n = nnx.split(parametric_model)
+    # Get architecture and current parameters (only split if not provided)
+    if current_params is None or graphdef is None:
+        graphdef, current_params = nnx.split(parametric_model)
+    theta_n = current_params
     # Update theta using symplectic Euler step
     alpha, xi = fixed_point_solver(
         z_samples=z_samples,
@@ -99,10 +103,7 @@ def hamiltonian_flow_step(
         energy_grad,
     )
 
-    updated_parametric_model = nnx.merge(graph_def, alpha)
-
     step_info = {
-        "energy": energy,
         "energy": energy,
         "internal_energy": energy_breakdown["internal_energy"],
         "linear_energy": energy_breakdown["linear_energy"],
@@ -110,6 +111,10 @@ def hamiltonian_flow_step(
         "step_size": step_size,
     }
 
+    if only_return_params:
+        return alpha, p_new, step_info
+
+    updated_parametric_model = nnx.merge(graphdef, alpha)
     return updated_parametric_model, p_new, step_info
 
 
@@ -157,8 +162,9 @@ def fixed_point_solver(
         tol=tol,
         regularization=regularization,
     )
-    # run n_iters of fixed point iteration
-    for _ in range(n_iters):
+    # run n_iters of fixed point iteration using lax.fori_loop for better JIT compilation
+    def iteration_step(i, carry):
+        alpha, xi = carry
         # update alpha
         alpha = jax.tree.map(lambda a, x: a + h * x, theta_n, xi)
         # update xi
@@ -166,21 +172,28 @@ def fixed_point_solver(
         xi = jax.tree.map(
             lambda prev, mpv, p: prev - gamma * (mpv - p), xi, mvp_result, p_n
         )
+        return (alpha, xi)
+
+    alpha, xi = jax.lax.fori_loop(0, n_iters, iteration_step, (alpha, xi))
     return alpha, xi
 
 
 def compute_hamiltonian(
-    theta: PyTree, p: PyTree, z_samples: Array, G_mat: G_matrix, potential: Potential
+    theta: PyTree, p: PyTree, z_samples: Array, G_mat: G_matrix, potential: Potential,
+    graphdef: Optional[nnx.GraphDef] = None,
 ) -> float:
     """Compute H = (1/2)p^T G^(-1) p + F(θ)"""
     # Kinetic energy
     h, _ = G_mat.solve_system(z_samples, p, params=theta)
-    kinetic = 0.5 * sum(
-        jax.tree.leaves(jax.tree.map(lambda a, b: jnp.sum(a * b), p, h))
-    )
-    graph_def, _ = nnx.split(G_mat.mapping)
+    leaves = jax.tree.leaves(jax.tree.map(lambda a, b: jnp.sum(a * b), p, h))
+    kinetic = 0.5 * jnp.sum(jnp.array(leaves))
+
+    # Get graphdef if not provided
+    if graphdef is None:
+        graphdef, _ = nnx.split(G_mat.mapping)
+
     # Potential energy
-    temp_parametric_model = nnx.merge(graph_def, theta)
+    temp_parametric_model = nnx.merge(graphdef, theta)
     _, potential_energy, _ = potential.evaluate_energy(
         temp_parametric_model, z_samples, theta
     )

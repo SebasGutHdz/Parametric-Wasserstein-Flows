@@ -68,11 +68,9 @@ def run_inna_flow(
         results: Dictionary containing energy history, gradient norms, etc.
     """
 
-    current_parametric_model = parametric_model
-
-    # Initialize ψ with same structure as parameters
-    _, init_params = nnx.split(parametric_model)
-    psi = initialize_psi(init_params, method=psi_init_method)
+    # Split ONCE at the beginning - this is the only split in the entire flow
+    graphdef, current_params = nnx.split(parametric_model)
+    psi = initialize_psi(current_params, method=psi_init_method)
 
     # Initialize tracking
     energy_history = []
@@ -91,18 +89,18 @@ def run_inna_flow(
 
         if iteration == 0 and plot_intermediate:
             _, samples0, _, _, _ = potential.evaluate_energy(
-                current_parametric_model, z_samples
+                parametric_model, z_samples, current_params
             )
 
         # Generate fresh samples for evaluation
         key, subkey = jax.random.split(key)
         z_samples_eval = jax.random.normal(
-            subkey, (N_samples, current_parametric_model.problem_dimension)
+            subkey, (N_samples, parametric_model.problem_dimension)
         )
 
-        # Perform INNA flow step
-        current_parametric_model, psi, step_info = inna_flow_step(
-            current_parametric_model,
+        # Perform INNA flow step - pass graphdef and params directly
+        current_params, psi, step_info = inna_flow_step(
+            parametric_model,
             psi,
             z_samples_eval,
             G_mat,
@@ -114,10 +112,11 @@ def run_inna_flow(
             solver=solver,
             solver_tol=tolerance,
             regularization=regularization,
+            only_return_params=True,
+            graphdef=graphdef,
+            current_params=current_params,
         )
-
-        # Get current parameters
-        _, current_params = nnx.split(current_parametric_model)
+        # current_params is now updated directly, no need to split
         current_energy = step_info["energy"]
 
         # Store diagnostics
@@ -147,7 +146,7 @@ def run_inna_flow(
 
             if plot_intermediate:
                 current_energy_eval, samples1, _, _, _ = potential.evaluate_energy(
-                    current_parametric_model, z_samples, current_params
+                    parametric_model, z_samples, current_params
                 )
                 sample_history.append(samples1)
 
@@ -169,7 +168,7 @@ def run_inna_flow(
 
         if iteration == 0 and plot_intermediate:
             _, samples0, _, _, _ = potential.evaluate_energy(
-                current_parametric_model, z_samples, current_params
+                parametric_model, z_samples, current_params
             )
 
         # Early stopping conditions
@@ -184,9 +183,12 @@ def run_inna_flow(
             print(f"Energy increment below tolerance at iteration {iteration}")
             break
 
+    # Merge ONCE at the end to get the final model
+    final_parametric_model = nnx.merge(graphdef, current_params)
+
     # Evaluate energy of the final iterate
     final_energy, final_samples, _, _, _ = potential.evaluate_energy(
-        current_parametric_model,
+        final_parametric_model,
         z_samples,
     )
 
@@ -204,7 +206,7 @@ def run_inna_flow(
     print(f"Final ||θ||:         {param_norms[-1]:.6f}")
 
     return {
-        "final_parametric_model": current_parametric_model,
+        "final_parametric_model": final_parametric_model,
         "final_psi": psi,
         "energy_history": energy_history,
         "euclid_grad_norm_history": euclid_grad_norm_history,

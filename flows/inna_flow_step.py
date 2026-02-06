@@ -29,6 +29,8 @@ def inna_flow_step(
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
     only_return_params: bool = False,
+    graphdef: Optional[nnx.GraphDef] = None,
+    current_params: Optional[PyTree] = None,
 ) -> Tuple[Union[nnx.Module, PyTree], PyTree, dict]:
     """
     INNA (Inertial Neural Network Algorithm) flow step using Riemannian gradient.
@@ -60,8 +62,9 @@ def inna_flow_step(
         step_info: Dictionary with step diagnostics
     """
 
-    # Get current parameters
-    graphdef, current_params = nnx.split(parametric_model)
+    # Get current parameters (only split if not provided)
+    if current_params is None or graphdef is None:
+        graphdef, current_params = nnx.split(parametric_model)
 
     # Compute energy gradient using the potential
     energy_grad, energy, energy_breakdown = potential.compute_energy_gradient(
@@ -105,12 +108,6 @@ def inna_flow_step(
         common_term
     )
 
-    if only_return_params:
-        return updated_params, updated_psi, {"energy": energy}
-
-    # Create updated parametric model
-    updated_parametric_model = nnx.merge(graphdef, updated_params)
-
     # Compute diagnostics
     grad_norm = jnp.sqrt(
         sum(jax.tree.leaves(jax.tree.map(lambda x: jnp.sum(x**2), energy_grad)))
@@ -139,6 +136,12 @@ def inna_flow_step(
         "interaction_energy": energy_breakdown["interaction_energy"],
         "solver_iterations": solver_info.get("iterations", 0),
     }
+
+    if only_return_params:
+        return updated_params, updated_psi, step_info
+
+    # Create updated parametric model
+    updated_parametric_model = nnx.merge(graphdef, updated_params)
 
     return updated_parametric_model, updated_psi, step_info
 

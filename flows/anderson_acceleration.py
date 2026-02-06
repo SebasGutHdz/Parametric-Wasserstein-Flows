@@ -86,8 +86,10 @@ def anderson_method(
     residual_history = None
     param_diffs = None
     residual_diffs = None
+    # Split ONCE at the beginning to get graphdef
+    graphdef, initial_split_params = nnx.split(parametric_model)
     if initial_params is None:
-        _, current_params = nnx.split(parametric_model)
+        current_params = initial_split_params
     else:
         current_params = initial_params
 
@@ -142,6 +144,7 @@ def anderson_method(
             solver_maxiter=solver_maxiter,
             regularization=regularization,
             l2_reg_gamma=l2_reg_gamma,
+            graphdef=graphdef,
         )
 
         if iteration == 0:
@@ -225,6 +228,9 @@ def anderson_method(
         print(f"Final residual norm: {residual_norms[-1]:.6e}")
         print(f"Final energy: {energy_trajectory[-1]:.6e}")
 
+    # Merge ONCE at the end to get the final model
+    final_parametric_model = nnx.merge(graphdef, current_params)
+
     # Build history dictionary
     history = {
         "params": params_trajectory,
@@ -236,6 +242,7 @@ def anderson_method(
         "residual_history": residual_history,
         "param_diffs": param_diffs,
         "residual_diffs": residual_diffs,
+        "final_parametric_model": final_parametric_model,
     }
 
     return current_params, history
