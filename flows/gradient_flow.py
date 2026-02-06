@@ -63,7 +63,8 @@ def run_gradient_flow(
         results: Dictionary containing energy history, solver stats, etc.
     """
 
-    current_parametric_model = parametric_model
+    # Split ONCE at the beginning - this is the only split in the entire flow
+    graphdef, current_params = nnx.split(parametric_model)
 
     # Initialize tracking
     energy_history = []
@@ -83,16 +84,16 @@ def run_gradient_flow(
 
         if iteration == 0:
             _, samples0, _, _, _ = potential.evaluate_energy(
-                current_parametric_model, z_samples
+                parametric_model, z_samples, current_params
             )
         # Generate key and samples for evaluation
         key, subkey = jax.random.split(key)
         z_samples_eval = jax.random.normal(
-            subkey, (N_samples, current_parametric_model.problem_dimension)
+            subkey, (N_samples, parametric_model.problem_dimension)
         )
-        # Perform gradient flow step
-        current_parametric_model, step_info = gradient_flow_step(
-            current_parametric_model,
+        # Perform gradient flow step - pass graphdef and params directly
+        current_params, step_info = gradient_flow_step(
+            parametric_model,
             z_samples_eval,
             G_mat,
             potential,
@@ -100,19 +101,17 @@ def run_gradient_flow(
             solver=solver,
             solver_tol=tolerance,
             regularization=regularization,
+            only_return_params=True,
+            graphdef=graphdef,
+            current_params=current_params,
         )
-
-        # Evaluate new energy
-        _, current_params = nnx.split(current_parametric_model)
+        # current_params is now updated directly, no need to split
         current_energy = step_info["energy"]
 
         # Store diagnostics
         energy_history.append(float(step_info["energy"]))
         solver_stats.append(step_info)
-        param_norm = jnp.sqrt(
-            sum(jax.tree.leaves(jax.tree.map(lambda x: jnp.sum(x**2), current_params)))
-        )
-        param_norms.append(float(param_norm))
+        param_norms.append(float(step_info["param_norm"]))
         euclid_grad_norm_history.append(step_info["gradient_norm"])
         riemann_grad_norm_history.append(step_info["riemann_gradient_norm"])
 
@@ -130,7 +129,7 @@ def run_gradient_flow(
             iteration % progress_every == 0 and iteration > 0
         ) or iteration == max_iterations - 2:
             current_energy, samples1, _, _, _ = potential.evaluate_energy(
-                current_parametric_model, z_samples, current_params
+                parametric_model, z_samples, current_params
             )
             sample_history.append(samples1)
             print(
@@ -158,7 +157,7 @@ def run_gradient_flow(
         if iteration == 0:
             # for plotting sample at previous checkpoint vs current
             _, samples0, _, _, _ = potential.evaluate_energy(
-                current_parametric_model, z_samples, current_params
+                parametric_model, z_samples, current_params
             )
         # Early stopping conditions
         if iteration > 1 and jnp.abs(current_energy) < tolerance:
@@ -171,6 +170,9 @@ def run_gradient_flow(
         ):
             print(f"Energy increment below tolerance at {iteration}")
             break
+
+    # Merge ONCE at the end to get the final model
+    current_parametric_model = nnx.merge(graphdef, current_params)
 
     # eval energy of the final iterate
     final_energy, samples0, _, _, _ = potential.evaluate_energy(

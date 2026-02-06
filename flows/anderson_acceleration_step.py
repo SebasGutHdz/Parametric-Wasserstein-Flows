@@ -40,6 +40,7 @@ def anderson_step(
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
     l2_reg_gamma: float = 1e-6,
+    graphdef: Optional[nnx.GraphDef] = None,
 ) -> Tuple[PyTree, List[PyTree], List[PyTree], Dict]:
     """
     Anderson acceleration step for fixed-point iteration.
@@ -67,7 +68,7 @@ def anderson_step(
         new_residual_history: Updated residual history
         info: Dictionary with information about the step (e.g., energy, gradient norm)
     """
-    if current_params is None:
+    if current_params is None or graphdef is None:
         graphdef, current_params = nnx.split(parametric_model)
 
     if param_history is None:
@@ -80,9 +81,11 @@ def anderson_step(
             step_size=step_size,
             solver=solver,
             solver_tol=solver_tol,
-            solver_maxiter=10,
+            solver_maxiter=solver_maxiter,
             regularization=regularization,
             only_return_params=True,
+            graphdef=graphdef,
+            current_params=current_params,
         )
         r_0 = compute_fixed_point_residual(
             parametric_model,
@@ -161,7 +164,7 @@ def anderson_step(
     new_param_diff = ([delta_theta_n] + param_diff)[:memory_size]
     new_residual_diff = ([delta_r_new] + residual_diff)[:memory_size]
 
-    parametric_model = nnx.update(parametric_model, theta_new)
+    # Note: Removed nnx.update - caller handles model state via params
 
     return (
         new_params_history,

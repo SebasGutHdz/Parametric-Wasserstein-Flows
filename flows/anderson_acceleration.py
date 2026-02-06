@@ -16,6 +16,7 @@ from jax import Device
 from geometry.G_matrix import G_matrix
 from geometry.lin_alg_solvers import minres
 from flows.anderson_acceleration_step import anderson_step
+from flows.visualization import plot_gradient_flow
 
 from functionals.functional import Potential
 from parametric_model.parametric_model import ParametricModel
@@ -33,7 +34,7 @@ def anderson_method(
     memory_size: int = 5,
     relaxation: float = 1.0,
     anderson_tol: float = 1e-6,
-    solver: str = "minres",
+    solver: str = "cg",
     solver_tol: float = 1e-6,
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
@@ -85,8 +86,10 @@ def anderson_method(
     residual_history = None
     param_diffs = None
     residual_diffs = None
+    # Split ONCE at the beginning to get graphdef
+    graphdef, initial_split_params = nnx.split(parametric_model)
     if initial_params is None:
-        _, current_params = nnx.split(parametric_model)
+        current_params = initial_split_params
     else:
         current_params = initial_params
 
@@ -110,11 +113,11 @@ def anderson_method(
     print(f"  mixing_parameter: {relaxation}")
     print("-" * 60)
 
-    # evaluate initial energy
+    # evaluate initial energy and get initial samples for plotting
     key, subkey = jax.random.split(key)
     z_samples = jax.random.normal(subkey, (batch_size, problem_dim))
-    energy_init, _, _, _, _ = potential.evaluate_energy(
-        parametric_model, z_samples=z_samples
+    energy_init, samples_prev, _, _, _ = potential.evaluate_energy(
+        parametric_model, z_samples=test_data_set
     )
     energy_trajectory.append(float(energy_init))
 
@@ -141,6 +144,7 @@ def anderson_method(
             solver_maxiter=solver_maxiter,
             regularization=regularization,
             l2_reg_gamma=l2_reg_gamma,
+            graphdef=graphdef,
         )
 
         if iteration == 0:
@@ -189,18 +193,23 @@ def anderson_method(
                 f"Residual: {residual_norm:12.6e} | "
             )
             if plot_intermediate:
-                # Display current samples of current model
-                plt.figure(figsize=(6, 6))
-                plt.scatter(
-                    x_samples[:, 0], x_samples[:, 1], alpha=0.5, label="Model Samples"
-                )
-                plt.title(f"Samples at Iteration {iteration}")
-                plt.xlabel("x1")
-                plt.ylabel("x2")
-                plt.axis("equal")
-                plt.legend()
-                plt.grid(True)
-                plt.show()
+                try:
+                    fig = plot_gradient_flow(
+                        samples_prev,
+                        x_samples,
+                        potential,
+                        energy,
+                        iteration,
+                        plot_frequency,
+                    )
+                    plt.tight_layout()
+                    plt.show()
+                    plt.close(fig)
+                except Exception as e:
+                    print("Plotting failed due to the following error:")
+                    print(e)
+                # Update previous samples for next plot
+                samples_prev = x_samples
 
         # Check convergence
         if residual_norm < convergence_tol:
@@ -219,6 +228,9 @@ def anderson_method(
         print(f"Final residual norm: {residual_norms[-1]:.6e}")
         print(f"Final energy: {energy_trajectory[-1]:.6e}")
 
+    # Merge ONCE at the end to get the final model
+    final_parametric_model = nnx.merge(graphdef, current_params)
+
     # Build history dictionary
     history = {
         "params": params_trajectory,
@@ -230,6 +242,7 @@ def anderson_method(
         "residual_history": residual_history,
         "param_diffs": param_diffs,
         "residual_diffs": residual_diffs,
+        "final_parametric_model": final_parametric_model,
     }
 
     return current_params, history

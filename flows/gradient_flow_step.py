@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flax import nnx
 from jaxtyping import Array, PyTree
-from typing import Tuple, Any, Union
+from typing import Tuple, Any, Union, Optional
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -40,6 +40,8 @@ def gradient_flow_step(
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
     only_return_params: bool = False,
+    graphdef: Optional[nnx.GraphDef] = None,
+    current_params: Optional[PyTree] = None,
 ) -> Tuple[Union[nnx.Module, PyTree], dict]:
     """
     Generic gradient flow step that works with any Potential
@@ -58,8 +60,9 @@ def gradient_flow_step(
         step_info: Dictionary with step diagnostics
     """
 
-    # Get current parameters
-    _, current_params = nnx.split(parametric_model)
+    # Get current parameters (only split if not provided)
+    if current_params is None or graphdef is None:
+        graphdef, current_params = nnx.split(parametric_model)
 
     # Compute energy gradient using the potential
     energy_grad, energy, energy_breakdown = potential.compute_energy_gradient(
@@ -82,13 +85,6 @@ def gradient_flow_step(
     # TODO: Higher order derivative solvers.
     updated_params = jax.tree.map(lambda p, e: p - step_size * e, current_params, eta)
 
-    if only_return_params:
-        return updated_params, {}
-
-    # Create updated parametric model
-    graphdef, _ = nnx.split(parametric_model)
-    updated_parametric_model = nnx.merge(graphdef, updated_params)
-    # updated_parametric_model = move_to_device(updated_parametric_model, device)
     # Compute diagnostics
     grad_norm = jnp.sqrt(
         sum(jax.tree.leaves(jax.tree.map(lambda x: jnp.sum(x**2), energy_grad)))
@@ -113,5 +109,11 @@ def gradient_flow_step(
         "interaction_energy": energy_breakdown["interaction_energy"],
         "step_size": step_size,
     }
+
+    if only_return_params:
+        return updated_params, step_info
+
+    # Create updated parametric model
+    updated_parametric_model = nnx.merge(graphdef, updated_params)
 
     return updated_parametric_model, step_info

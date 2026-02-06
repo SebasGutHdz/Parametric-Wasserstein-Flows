@@ -185,7 +185,7 @@ class NeuralODE(nnx.Module):
     def __call__(
         self,
         y0: Array,
-        t_span: Optional[Tuple[float, float]] = (0.0, 1.0),
+        t_span: Optional[Tuple[float, float]] = (0.0, 0.5),
         params: Optional[PyTree] = None,
         history: bool = False,
     ) -> Array:
@@ -287,4 +287,4 @@ class NeuralODE(nnx.Module):
         if params is None:
             _, params = nnx.split(self.dynamics)
 
-        return self.__call__(x, t_span=(1.0, 0.0), params=params, history=history)
+        return self.__call__(x, t_span=(0.5, 0.0), params=params, history=history)
