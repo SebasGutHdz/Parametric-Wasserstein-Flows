@@ -1,0 +1,287 @@
+{
+  "experiment": {
+    "name": "parametric_bv_hamiltonian_benchmark",
+    "description": "Comprehensive benchmark of parametric flows in Wasserstein space using gradient flow, Anderson acceleration, and memoryless quasi-Newton methods",
+    "output_directory": "results/parametric_bv_hamiltonian_benchmark",
+    "random_seed": 42,
+    "date": "2026-02-09",
+    "version": "1.0.0",
+    "author": "Research Team"
+  },
+
+  "distributions": {
+    "gaussian": {
+      "name": "gaussian",
+      "description": "Standard multivariate Gaussian distribution",
+      "dimension": 2,
+      "mean": [0.0, 0.0],
+      "covariance": [
+        [1.0, 0.0],
+        [0.0, 1.0]
+      ],
+      "samples": 1000,
+      "true_potential": "quadratic"
+    },
+    "double_banana": {
+      "name": "double_banana",
+      "description": "Double-well potential with two minima at (0, ±1)",
+      "dimension": 2,
+      "potential": "double_well",
+      "alpha": 1.0,
+      "samples": 1000,
+      "true_potential": "double_well"
+    },
+    "styblinski_tang": {
+      "name": "styblinski_tang",
+      "description": "Styblinski-Tang potential with global minimum at (-2.9035, -2.9035)",
+      "dimension": 2,
+      "potential": "styblinski_tang",
+      "samples": 1000,
+      "true_potential": "styblinski_tang"
+    }
+  },
+
+  "model_configurations": {
+    "node": {
+      "name": "NeuralODE",
+      "description": "Continuous-time neural network using NODE architecture",
+      "architecture": "node",
+      "parameters": {
+        "num_layers": [2, 3, 4],
+        "width_layers": [64, 128],
+        "activation_fn": ["relu", "tanh", "gelu"],
+        "time_dependent": [false],
+        "solver": ["euler", "rk4"],
+        "dt0": [0.1],
+        "rtol": [1e-4],
+        "atol": [1e-6]
+      }
+    },
+    "resnet": {
+      "name": "ResNet",
+      "description": "Residual network architecture with skip connections",
+      "architecture": "resnet",
+      "parameters": {
+        "num_layers": [2, 3, 4],
+        "width_layers": [64, 128],
+        "activation_fn": ["relu", "tanh", "gelu"],
+        "residual_blocks": [true]
+      }
+    }
+  },
+
+  "methods": {
+    "gradient_flow": {
+      "name": "Gradient Flow",
+      "description": "Basic gradient flow method with fixed step size",
+      "parameters": {
+        "step_size": [0.001, 0.01, 0.1],
+        "max_iterations": [100, 200, 500],
+        "solver": ["minres", "cg"],
+        "solver_tol": [1e-6, 1e-8],
+        "regularization": [1e-6, 1e-8],
+        "batch_size": [100, 200, 500],
+        "tolerance": [1e-6, 1e-8]
+      }
+    },
+    "anderson_acceleration": {
+      "name": "Anderson Acceleration",
+      "description": "Anderson-accelerated gradient flow with memory-based acceleration",
+      "parameters": {
+        "step_size": [0.001, 0.01, 0.1],
+        "max_iterations": [100, 200, 500],
+        "memory_size": [2, 5, 10],
+        "relaxation": [0.5, 0.8, 1.0, 1.2],
+        "anderson_tol": [1e-6, 1e-8],
+        "solver": ["minres", "cg"],
+        "solver_tol": [1e-6, 1e-8],
+        "solver_maxiter": [50, 100],
+        "regularization": [1e-6, 1e-8],
+        "convergence_tol": [1e-6, 1e-8],
+        "batch_size": [100, 200, 500],
+        "regularization_factor_gamma": [1e-6, 1e-8],
+        "regularization_method_gamma": [1e-6, 1e-8],
+        "ensure_descent": [false, true]
+      }
+    },
+    "memoryless_qn": {
+      "name": "Memoryless Quasi-Newton",
+      "description": "Memoryless quasi-Newton method with Hessian approximation",
+      "parameters": {
+        "step_size": [0.001, 0.01, 0.1],
+        "max_iterations": [100, 200, 500],
+        "solver": ["cg", "minres"],
+        "solver_tol": [1e-6, 1e-8],
+        "solver_maxiter": [50, 100],
+        "solver_regularization": [1e-6, 1e-8],
+        "hessian_update_strategy": ["preconvex", "BFGS"],
+        "regularization_strategy": ["Li-Fukushima", "Powell"],
+        "spectral_scaling": [true, false],
+        "convergence_tol": [1e-6, 1e-8],
+        "batch_size": [100, 200, 500],
+        "ensure_descent": [false, true]
+      }
+    }
+  },
+
+  "parameter_grids": {
+    "step_sizes": {
+      "values": [0.001, 0.01, 0.1],
+      "description": "Fixed step size for gradient-based methods"
+    },
+    "batch_sizes": {
+      "values": [100, 200, 500],
+      "description": "Number of samples per iteration for Monte Carlo estimation"
+    },
+    "max_iterations": {
+      "values": [100, 200, 500],
+      "description": "Maximum number of optimization iterations"
+    },
+    "memory_sizes": {
+      "values": [2, 5, 10],
+      "description": "Number of previous iterations to use for Anderson acceleration"
+    },
+    "relaxation_factors": {
+      "values": [0.5, 0.8, 1.0, 1.2],
+      "description": "Mixing parameter for Anderson acceleration"
+    },
+    "solver_tolerances": {
+      "values": [1e-6, 1e-8],
+      "description": "Tolerance for linear system solvers"
+    },
+    "regularization_parameters": {
+      "values": [1e-6, 1e-8],
+      "description": "Regularization for linear system conditioning"
+    },
+    "convergence_tolerances": {
+      "values": [1e-6, 1e-8],
+      "description": "Convergence tolerance for optimization methods"
+    },
+    "architectures": {
+      "values": ["node", "resnet"],
+      "description": "Neural network architectures for parametric models"
+    },
+    "activations": {
+      "values": ["relu", "tanh", "gelu"],
+      "description": "Activation functions for neural networks"
+    },
+    "network_widths": {
+      "values": [64, 128],
+      "description": "Width of hidden layers in neural networks"
+    },
+    "network_depths": {
+      "values": [2, 3, 4],
+      "description": "Number of hidden layers in neural networks"
+    }
+  },
+
+  "plotting_configuration": {
+    "enabled": true,
+    "frequency": {
+      "gradient_flow": 10,
+      "anderson_acceleration": 10,
+      "memoryless_qn": 10
+    },
+    "plot_types": {
+      "sample_trajectories": true,
+      "energy_history": true,
+      "gradient_norms": true,
+      "residual_norms": true,
+      "parameter_norms": true,
+      "comparative_plots": true
+    },
+    "output_formats": ["png", "pdf", "svg"],
+    "dpi": 300,
+    "figure_size": [8, 6],
+    "save_intermediate": true,
+    "show_live": false,
+    "log_scale": {
+      "energy": true,
+      "gradient_norms": true,
+      "residual_norms": true
+    }
+  },
+
+  "evaluation_metrics": {
+    "energy_convergence": {
+      "track": true,
+      "threshold": 1e-6,
+      "window_size": 5
+    },
+    "gradient_convergence": {
+      "track": true,
+      "threshold": 1e-6,
+      "window_size": 5
+    },
+    "residual_convergence": {
+      "track": true,
+      "threshold": 1e-6,
+      "window_size": 5
+    },
+    "parameter_change": {
+      "track": true,
+      "threshold": 1e-6,
+      "window_size": 5
+    },
+    "wall_time": {
+      "track": true,
+      "unit": "seconds"
+    },
+    "memory_usage": {
+      "track": true,
+      "unit": "MB"
+    },
+    "sample_quality": {
+      "track": true,
+      "metrics": ["KL_divergence", "Wasserstein_distance", "energy_error"]
+    }
+  },
+
+  "hyperparameter_search": {
+    "strategy": "grid_search",
+    "parallel_jobs": 4,
+    "early_stopping": {
+      "enabled": true,
+      "patience": 10,
+      "metric": "energy_convergence"
+    },
+    "random_seed": 42,
+    "resume_from_checkpoint": false
+  },
+
+  "device_configuration": {
+    "device": "auto",
+    "use_gpu": true,
+    "precision": "float32",
+    "jit_compilation": true,
+    "device_count": 1
+  },
+
+  "logging_configuration": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "file_logging": true,
+    "log_directory": "logs/parametric_bv_hamiltonian_benchmark",
+    "log_file": "benchmark.log",
+    "console_output": true,
+    "log_frequency": 1
+  },
+
+  "data_handling": {
+    "cache_samples": true,
+    "cache_directory": "cache/parametric_bv_hamiltonian_benchmark",
+    "sample_size": 10000,
+    "test_sample_size": 5000,
+    "validation_split": 0.2,
+    "shuffle_data": true,
+    "seed": 42
+  },
+
+  "documentation": {
+    "include_readme": true,
+    "include_method_descriptions": true,
+    "include_parameter_descriptions": true,
+    "include_results_summary": true,
+    "include_comparison_analysis": true
+  }
+}

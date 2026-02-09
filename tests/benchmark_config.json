@@ -1,0 +1,74 @@
+{
+  "experiment_name": "method_benchmark",
+  "common_params": {
+    "seed": 0,
+    "dimension": 2,
+    "n_hidden": 2,
+    "width_hidden": 64,
+    "parametric_map": "node",
+    "rhs_model": "mlp",
+    "activation_fn": "tanh",
+    "time_dependent": true,
+    "ode_solver": "euler",
+    "dt0": 0.01,
+    "ref_density": "gaussian",
+    "scale_factor": 1.0,
+    "stepsize": 0.001,
+    "N_samples": 100,
+    "eval_samples": 30,
+    "plot_n_samples": 20,
+    "max_iterations": 10,
+    "tolerance": 0.0001,
+    "linear_solver": "cg",
+    "progress_every": 50
+  },
+  "distributions": [
+    {
+      "name": "gaussian",
+      "mean_value": 2.0,
+      "sigma_first": 1000.0,
+      "sigma_second": 10.0
+    },
+    {
+      "name": "double-banana",
+      "shift": [0.0, 10.0]
+    },
+    {
+      "name": "styblinski-tang"
+    }
+  ],
+  "methods": {
+    "gradient_flow": {
+    },
+    "anderson": {
+      "solver": ["minres"],
+      "memory_size": [8],
+      "relaxation": [1.25, 1.8],
+      "regularization": [1e-5, 1e-3],
+      "regularization_kind": ["l2", "adaptive"],
+      "ensure_descent": [true]
+    },
+    "memoryless_qn": {
+      "solver": ["cg"],
+      "solver_regularization": [1e-6],
+      "regularization_strategy": ["Li-Fukushima", "Powell"],
+      "hessian_update_strategy": ["preconvex", "BFGS"],
+      "spectral_scaling": [true, false]
+    }
+  },
+  "plotting": {
+    "figsize": [17, 6],
+    "scatter_figsize": [8, 8],
+    "colors": {
+      "gradient_flow": "#1f77b4",
+      "anderson": "#d62728",
+      "memoryless_qn": "#2ca02c"
+    },
+    "linestyles": ["-", "--", ":", "-.", "-"],
+    "linewidths": [2.3, 1.9, 1.5, 1.2, 1.0],
+    "markers": ["o", "^", "s", "D", "x", "P", "*", "v"],
+    "scatter_size": 22,
+    "gf_alpha": 0.45,
+    "method_alpha": 0.55
+  }
+}
