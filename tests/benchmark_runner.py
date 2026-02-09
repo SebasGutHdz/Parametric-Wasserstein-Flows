@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-import os
 import argparse
+import gc
 import hashlib
 import itertools
 import json
@@ -14,7 +14,9 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-from flax import nnx, serialization
+import orbax.checkpoint as ocp
+from flax import nnx
+from flax.training import orbax_utils
 from jax.scipy.special import logsumexp
 
 # TODO: proper installation
@@ -215,13 +217,18 @@ def sample_reference(common: dict[str, Any], seed: int, n_samples: int | None = 
     return jax.random.normal(key, (n, dim))
 
 
-def serialize_state(state: Any) -> np.ndarray:
-    data = serialization.to_bytes(state)
-    return np.frombuffer(data, dtype=np.uint8)
+def save_model_checkpoint(final_model: ParametricModel, ckpt_dir: Path) -> None:
+    import shutil
 
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    ckpt_dir.parent.mkdir(parents=True, exist_ok=True)
 
-def deserialize_state(template_state: Any, packed: np.ndarray) -> Any:
-    return serialization.from_bytes(template_state, packed.tobytes())
+    state = nnx.state(final_model)
+    checkpointer = ocp.PyTreeCheckpointer()
+    save_args = orbax_utils.save_args_from_target(state)
+    abspath = ckpt_dir.absolute()
+    checkpointer.save(abspath, state, save_args=save_args)
 
 
 def run_single(
@@ -239,10 +246,10 @@ def run_single(
     max_iterations = int(common.get("max_iterations", 300))
     stepsize = float(common["stepsize"])
     tolerance = float(common.get("tolerance", 1e-4))
-    solver = common.get("linear_solver", "minres")
+    solver = common.get("linear_solver", "cg")
     z_samples = sample_reference(common, run_seed + 13, n_samples=int(common.get("eval_samples", 300)))
 
-    t0 = time.time()
+    t0 = time.perf_counter()
 
     if method == "gradient_flow":
         history = run_gradient_flow(
@@ -326,10 +333,7 @@ def run_single(
     else:
         raise ValueError(f"Unsupported method: {method}")
 
-    runtime_sec = time.time() - t0
-    graphdef, state = nnx.split(final_model)
-    _ = graphdef
-    state_blob = serialize_state(state)
+    runtime_sec = time.perf_counter() - t0
 
     return {
         "method": method,
@@ -341,30 +345,36 @@ def run_single(
         "energy_history": energies,
         "riemann_grad_history": riem_grad,
         "runtime_sec": runtime_sec,
-        "model_state": state_blob,
+        "_final_model": final_model,
     }
 
 
-def dump_h5(path: Path, config: dict[str, Any], runs: list[dict[str, Any]]) -> None:
+def initialize_h5(path: Path, config: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as h5:
         h5.attrs["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         h5.attrs["config_json"] = json.dumps(config)
-        h5.attrs["run_count"] = len(runs)
+        h5.attrs["run_count"] = 0
+        h5.create_group("runs")
 
-        runs_grp = h5.create_group("runs")
-        for idx, run in enumerate(runs):
-            run_id = f"run_{idx:04d}"
-            grp = runs_grp.create_group(run_id)
-            grp.attrs["method"] = run["method"]
-            grp.attrs["distribution"] = run["distribution"]["name"]
-            grp.attrs["method_params_json"] = json.dumps(run["method_params"], sort_keys=True)
-            grp.attrs["model_config_json"] = json.dumps(run["model_config"], sort_keys=True)
-            grp.attrs["common_json"] = json.dumps(run["common"], sort_keys=True)
-            grp.attrs["runtime_sec"] = float(run["runtime_sec"])
-            grp.create_dataset("energy_history", data=run["energy_history"])
-            grp.create_dataset("riemann_grad_history", data=run["riemann_grad_history"])
-            grp.create_dataset("model_state_bytes", data=run["model_state"], compression="gzip")
+
+def append_run_to_h5(path: Path, run_id: str, run: dict[str, Any]) -> None:
+    with h5py.File(path, "a") as h5:
+        runs_grp = h5["runs"]
+        if run_id in runs_grp:
+            del runs_grp[run_id]
+        grp = runs_grp.create_group(run_id)
+        grp.attrs["method"] = run["method"]
+        grp.attrs["distribution"] = run["distribution"]["name"]
+        grp.attrs["method_params_json"] = json.dumps(run["method_params"], sort_keys=True)
+        grp.attrs["model_config_json"] = json.dumps(run["model_config"], sort_keys=True)
+        grp.attrs["common_json"] = json.dumps(run["common"], sort_keys=True)
+        grp.attrs["runtime_sec"] = float(run["runtime_sec"])
+        grp.attrs["model_ckpt_relpath"] = run["model_ckpt_relpath"]
+        grp.create_dataset("energy_history", data=run["energy_history"])
+        grp.create_dataset("riemann_grad_history", data=run["riemann_grad_history"])
+        h5.attrs["run_count"] = int(h5.attrs.get("run_count", 0)) + 1
+        h5.flush()
 
 
 def load_runs_from_h5(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -382,9 +392,9 @@ def load_runs_from_h5(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]
                     "model_config": json.loads(str(grp.attrs["model_config_json"])),
                     "common": json.loads(str(grp.attrs["common_json"])),
                     "runtime_sec": float(grp.attrs["runtime_sec"]),
+                    "model_ckpt_relpath": str(grp.attrs["model_ckpt_relpath"]),
                     "energy_history": np.asarray(grp["energy_history"][:], dtype=np.float64),
                     "riemann_grad_history": np.asarray(grp["riemann_grad_history"][:], dtype=np.float64),
-                    "model_state": np.asarray(grp["model_state_bytes"][:], dtype=np.uint8),
                 }
             )
     return config, out
@@ -474,7 +484,7 @@ def save_convergence_plots(
         plt.close(fig)
 
 
-def restore_model_from_run(run: dict[str, Any]) -> ParametricModel:
+def restore_model_from_run(run: dict[str, Any], checkpoint_root: Path) -> ParametricModel:
     seed = int(run["model_config"].get("seed", 0))
     model = ParametricModel(
         parametric_map=run["model_config"]["parametric_map"],
@@ -488,9 +498,16 @@ def restore_model_from_run(run: dict[str, Any]) -> ParametricModel:
         scale_factor=run["model_config"]["scale_factor"],
         key=jax.random.PRNGKey(seed),
     )
-    graphdef, template_state = nnx.split(model)
-    restored_state = deserialize_state(template_state, run["model_state"])
-    return nnx.merge(graphdef, restored_state)
+    template_state = nnx.state(model)
+    ckpt_path = checkpoint_root / run["model_ckpt_relpath"]
+    if not ckpt_path.exists():
+        raise FileNotFoundError(
+            f"Missing checkpoint for run {run.get('run_id', '<unknown>')}: {ckpt_path}"
+        )
+    checkpointer = ocp.PyTreeCheckpointer()
+    restored_state = checkpointer.restore(str(ckpt_path), item=template_state)
+    nnx.update(model, restored_state)
+    return model
 
 
 def generate_samples(model: ParametricModel, dim: int, n_samples: int, seed: int) -> np.ndarray:
@@ -510,6 +527,7 @@ def get_dist_cfg(config: dict[str, Any], name: str) -> dict[str, Any]:
 def save_scatter_plots(
     config: dict[str, Any],
     runs: list[dict[str, Any]],
+    checkpoint_root: Path,
     output_dir: Path,
     file_prefix: str,
 ) -> None:
@@ -526,7 +544,7 @@ def save_scatter_plots(
             print(f"[warn] skip scatter for {distribution}: no gradient_flow run")
             continue
         gf_baseline = gf_runs[0]
-        gf_model = restore_model_from_run(gf_baseline)
+        gf_model = restore_model_from_run(gf_baseline, checkpoint_root)
         gf_samples = generate_samples(gf_model, dim, n_samples, seed=123)
 
         methods = sorted({run["method"] for run in dist_runs if run["method"] != "gradient_flow"})
@@ -549,7 +567,7 @@ def save_scatter_plots(
             all_method_samples = []
             for idx, run in enumerate(method_runs):
                 style = style_for_run(plotting_cfg, method, idx)
-                model = restore_model_from_run(run)
+                model = restore_model_from_run(run, checkpoint_root)
                 samples = generate_samples(model, dim, n_samples, seed=1000 + idx)
                 all_method_samples.append(samples)
                 ax.scatter(
@@ -606,13 +624,18 @@ def latest_h5(output_dir: Path) -> Path | None:
     return files[-1] if files else None
 
 
-def run_all(config: dict[str, Any], output_h5: Path) -> list[dict[str, Any]]:
+def run_all(config: dict[str, Any], output_h5: Path) -> dict[str, int]:
     common = config["common_params"]
     dist_cfgs = distribution_grid(config["distributions"])
     base_seed = int(common.get("seed", 0))
+    ckpt_root = output_h5.parent / "model_checkpoints" / output_h5.stem
+    ckpt_root.mkdir(parents=True, exist_ok=True)
+    initialize_h5(output_h5, config)
 
-    runs: list[dict[str, Any]] = []
     run_counter = 0
+    success_count = 0
+    failed_count = 0
+    fail_fast = bool(config.get("fail_fast", False))
     for dist in dist_cfgs:
         for method, m_cfg in config["methods"].items():
             for params in method_grid(m_cfg):
@@ -624,18 +647,31 @@ def run_all(config: dict[str, Any], output_h5: Path) -> list[dict[str, Any]]:
                     f"[run] dist={dist['name']} method={method} "
                     f"params={json.dumps(params, sort_keys=True)}"
                 )
-                run = run_single(
-                    method=method,
-                    method_params=params,
-                    distribution_cfg=dist,
-                    common=common,
-                    run_seed=base_seed + run_counter,
-                )
-                runs.append(run)
-                run_counter += 1
+                run_id = f"run_{run_counter:04d}"
+                try:
+                    run = run_single(
+                        method=method,
+                        method_params=params,
+                        distribution_cfg=dist,
+                        common=common,
+                        run_seed=base_seed + run_counter,
+                    )
+                    ckpt_relpath = Path("model_checkpoints") / output_h5.stem / run_id
+                    save_model_checkpoint(run["_final_model"], output_h5.parent / ckpt_relpath)
+                    run["model_ckpt_relpath"] = str(ckpt_relpath)
+                    run.pop("_final_model", None)
+                    append_run_to_h5(output_h5, run_id, run)
+                    success_count += 1
+                except Exception as exc:
+                    failed_count += 1
+                    print(f"[error] run {run_id} failed: {exc}")
+                    if fail_fast:
+                        raise
+                finally:
+                    run_counter += 1
+                    gc.collect()
 
-    dump_h5(output_h5, config, runs)
-    return runs
+    return {"success": success_count, "failed": failed_count}
 
 
 def parse_args() -> argparse.Namespace:
@@ -679,21 +715,32 @@ def main() -> None:
             raise FileNotFoundError("No .h5 file found for --plot-only mode")
         print(f"[plot-only] loading {h5_path}")
         loaded_config, loaded_runs = load_runs_from_h5(h5_path)
+        missing_ckpts = [
+            str((h5_path.parent / run["model_ckpt_relpath"]))
+            for run in loaded_runs
+            if not (h5_path.parent / run["model_ckpt_relpath"]).exists()
+        ]
+        if missing_ckpts:
+            preview = "\n".join(missing_ckpts[:5])
+            raise FileNotFoundError(
+                "Some checkpoint directories referenced by this .h5 are missing. "
+                f"First missing entries:\n{preview}"
+            )
         digest = hashlib.sha1(str(h5_path).encode("utf-8")).hexdigest()[:8]
         prefix = f"{experiment_name}_{digest}"
         save_convergence_plots(loaded_runs, loaded_config["plotting"], output_dir, prefix)
-        save_scatter_plots(loaded_config, loaded_runs, output_dir, prefix)
+        save_scatter_plots(loaded_config, loaded_runs, h5_path.parent, output_dir, prefix)
         print("[done] plots regenerated")
         return
 
     output_h5 = choose_output_h5(output_dir, experiment_name)
-    runs = run_all(config, output_h5)
+    stats = run_all(config, output_h5)
     digest = hashlib.sha1(str(output_h5).encode("utf-8")).hexdigest()[:8]
     prefix = f"{experiment_name}_{digest}"
-    save_convergence_plots(runs, config["plotting"], output_dir, prefix)
-
     config_for_scatter, runs_for_scatter = load_runs_from_h5(output_h5)
-    save_scatter_plots(config_for_scatter, runs_for_scatter, output_dir, prefix)
+    save_convergence_plots(runs_for_scatter, config_for_scatter["plotting"], output_dir, prefix)
+    save_scatter_plots(config_for_scatter, runs_for_scatter, output_h5.parent, output_dir, prefix)
+    print(f"[done] successful runs: {stats['success']}, failed runs: {stats['failed']}")
     print(f"[done] results saved to {output_h5}")
 
 
