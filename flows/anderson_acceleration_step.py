@@ -288,7 +288,7 @@ def compute_anderson_gamma(
             current_residual, current_residual, z_samples
         )
         delta_x_norm_sq = M_reg[0, 0]
-        regularization_factor = 1e-2 * r_cur_norm_sq / (delta_x_norm_sq + 1e-8)
+        regularization_factor *= r_cur_norm_sq / (delta_x_norm_sq + 1e-8)
     # Add l2 regulzarization
     A = A + M_reg * regularization_factor
     A = A + A.T - jnp.diag(A.diagonal())
