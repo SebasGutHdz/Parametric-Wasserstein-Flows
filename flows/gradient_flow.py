@@ -126,9 +126,7 @@ def run_gradient_flow(
         )
 
         # Progress reporting
-        if (
-            iteration % progress_every == 0 and iteration > 0
-        ) or iteration == max_iterations - 2:
+        if iteration % progress_every == 0 and iteration > 0:
             current_energy, samples1, _, _, _ = potential.evaluate_energy(
                 current_parametric_model, z_samples, current_params
             )
