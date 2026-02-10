@@ -237,6 +237,9 @@ def run_single(
     distribution_cfg: dict[str, Any],
     common: dict[str, Any],
     run_seed: int,
+    checkpoint_root: Path,
+    run_namespace: str,
+    run_id: str,
 ) -> dict[str, Any]:
     model, model_cfg = build_model(common, run_seed)
     potential, potential_meta = build_problem(distribution_cfg, common)
@@ -335,6 +338,9 @@ def run_single(
 
     runtime_sec = time.perf_counter() - t0
 
+    ckpt_relpath = Path("model_checkpoints") / run_namespace / run_id
+    save_model_checkpoint(final_model, checkpoint_root / ckpt_relpath)
+
     return {
         "method": method,
         "method_params": method_params,
@@ -345,7 +351,7 @@ def run_single(
         "energy_history": energies,
         "riemann_grad_history": riem_grad,
         "runtime_sec": runtime_sec,
-        "_final_model": final_model,
+        "model_ckpt_relpath": str(ckpt_relpath),
     }
 
 
@@ -505,7 +511,7 @@ def restore_model_from_run(run: dict[str, Any], checkpoint_root: Path) -> Parame
             f"Missing checkpoint for run {run.get('run_id', '<unknown>')}: {ckpt_path}"
         )
     checkpointer = ocp.PyTreeCheckpointer()
-    restored_state = checkpointer.restore(str(ckpt_path), item=template_state)
+    restored_state = checkpointer.restore(str(ckpt_path.absolute()), item=template_state)
     nnx.update(model, restored_state)
     return model
 
@@ -597,7 +603,6 @@ def save_scatter_plots(
                         y_bds=y_bds,
                         fill=False,
                         levels=20,
-                        colors="gray",
                         alpha=0.5,
                     )
             except Exception as exc:
@@ -655,11 +660,10 @@ def run_all(config: dict[str, Any], output_h5: Path) -> dict[str, int]:
                         distribution_cfg=dist,
                         common=common,
                         run_seed=base_seed + run_counter,
+                        checkpoint_root=output_h5.parent,
+                        run_namespace=output_h5.stem,
+                        run_id=run_id,
                     )
-                    ckpt_relpath = Path("model_checkpoints") / output_h5.stem / run_id
-                    save_model_checkpoint(run["_final_model"], output_h5.parent / ckpt_relpath)
-                    run["model_ckpt_relpath"] = str(ckpt_relpath)
-                    run.pop("_final_model", None)
                     append_run_to_h5(output_h5, run_id, run)
                     success_count += 1
                 except Exception as exc:
@@ -669,6 +673,7 @@ def run_all(config: dict[str, Any], output_h5: Path) -> dict[str, int]:
                         raise
                 finally:
                     run_counter += 1
+                    jax.clear_caches()
                     gc.collect()
 
     return {"success": success_count, "failed": failed_count}
