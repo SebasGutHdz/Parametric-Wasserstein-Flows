@@ -18,6 +18,7 @@ import orbax.checkpoint as ocp
 from flax import nnx
 from flax.training import orbax_utils
 from jax.scipy.special import logsumexp
+from num2tex import num2tex
 
 # TODO: proper installation
 root_path = Path.cwd().parent.absolute()
@@ -406,21 +407,68 @@ def load_runs_from_h5(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]
     return config, out
 
 
-def format_params(params: dict[str, Any]) -> str:
-    if not params:
-        return "default"
-    chunks = []
-    for key in sorted(params.keys()):
-        value = params[key]
-        if isinstance(value, float):
-            if abs(value) >= 1e-2 and abs(value) < 1e3:
-                rendered = f"{value:.4g}"
-            else:
-                rendered = f"{value:.2e}"
-        else:
-            rendered = str(value)
-        chunks.append(f"{key}={rendered}")
-    return ", ".join(chunks)
+KEY_LABELS = {
+    "relaxation": r"\beta",
+    "regularization": r"\lambda",
+    "stepsize": r"h",
+    "hessian_update_strategy": r"\mathrm{HS}",
+    "regularization_kind": r"\mathrm{RK}",
+    "regularization_strategy": r"\mathrm{RS}",
+    "spectral_scaling": r"\mathrm{SS}",
+    "memory_size": r"\mathrm{M}",
+    "ensure_descent": r"\mathrm{ED}",
+    "solver_maxiter": r"\mathrm{SMI}",
+    "solver_tol": r"\mathrm{ST}",
+    "anderson_tol": r"\mathrm{AT}",
+    "max_iterations": r"\mathrm{MI}",
+}
+
+VALUE_LABELS = {
+    "Li-Fukushima": r"\mathrm{LiF}",
+    "Powell": r"\mathrm{Pwl}",
+    "preconvex": r"\mathrm{PC}",
+    "adaptive": r"\mathrm{adp}",
+}
+
+
+def get_varying_keys(method_runs: list[dict[str, Any]]) -> list[str]:
+    if not method_runs:
+        return []
+    keys = sorted({k for run in method_runs for k in run["method_params"].keys()})
+    varying = []
+    for key in keys:
+        values = [run["method_params"].get(key, None) for run in method_runs]
+        if len(set(values)) > 1:
+            varying.append(key)
+    return varying
+
+
+def latex_key(key: str) -> str:
+    if key in KEY_LABELS:
+        return KEY_LABELS[key]
+    return rf"\mathrm{{{key.replace('_', r'\_')}}}"
+
+
+def latex_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return r"\mathrm{T}" if value else r"\mathrm{F}"
+    if isinstance(value, (int, float)):
+        return num2tex(value)
+    if isinstance(value, str) and value in VALUE_LABELS:
+        return VALUE_LABELS[value]
+    return rf"\mathrm{{{str(value).replace('_', r'\_')}}}"
+
+
+def build_method_label_latex(
+    method: str,
+    params: dict[str, Any],
+    varying_keys: list[str],
+) -> str:
+    method_tex = rf"\mathrm{{{method.replace('_', r'\_')}}}"
+    if not varying_keys:
+        return rf"${method_tex}$"
+    parts = [f"{latex_key(k)}={latex_value(params[k])}" for k in varying_keys if k in params]
+    return rf"${method_tex}\;|\;" + r",\;".join(parts) + "$"
 
 
 def style_for_run(
@@ -449,15 +497,29 @@ def save_convergence_plots(
     distributions = sorted({run["distribution"] for run in runs})
     for distribution in distributions:
         dist_runs = [run for run in runs if run["distribution"] == distribution]
+        method_runs_map: dict[str, list[dict[str, Any]]] = {}
+        for run in dist_runs:
+            method_runs_map.setdefault(run["method"], []).append(run)
+        varying_keys_map = {
+            method: get_varying_keys(method_runs)
+            for method, method_runs in method_runs_map.items()
+        }
+
         fig, axes = plt.subplots(1, 2, figsize=tuple(plotting_cfg.get("figsize", [16, 6])))
 
         per_method_counts: dict[str, int] = {}
+        used_labels: dict[str, int] = {}
         for run in dist_runs:
             m = run["method"]
             idx = per_method_counts.get(m, 0)
             per_method_counts[m] = idx + 1
             style = style_for_run(plotting_cfg, m, idx)
-            label = f"{m} | {format_params(run['method_params'])}"
+            label = build_method_label_latex(m, run["method_params"], varying_keys_map[m])
+            if label in used_labels:
+                used_labels[label] += 1
+                label = label[:-1] + rf"\;\mathrm{{(run\ {used_labels[label]})}}$"
+            else:
+                used_labels[label] = 1
             axes[0].plot(
                 run["energy_history"],
                 color=style["color"],
@@ -483,8 +545,8 @@ def save_convergence_plots(
         axes[1].set_ylabel("riemann grad norm")
         axes[0].grid(True)
         axes[1].grid(True)
-        axes[1].legend(fontsize=8)
-        fig.tight_layout()
+        axes[1].legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0)
+        fig.tight_layout(rect=(0.0, 0.0, 0.82, 1.0))
         out = output_dir / f"{file_prefix}_{distribution}_convergence.pdf"
         fig.savefig(out)
         plt.close(fig)
@@ -550,6 +612,7 @@ def save_scatter_plots(
             print(f"[warn] skip scatter for {distribution}: no gradient_flow run")
             continue
         gf_baseline = gf_runs[0]
+        gf_varying_keys = get_varying_keys(gf_runs)
         gf_model = restore_model_from_run(gf_baseline, checkpoint_root)
         gf_samples = generate_samples(gf_model, dim, n_samples, seed=123)
 
@@ -560,15 +623,21 @@ def save_scatter_plots(
                 continue
 
             fig, ax = plt.subplots(figsize=tuple(plotting_cfg.get("scatter_figsize", [8, 8])))
+            method_varying_keys = get_varying_keys(method_runs)
+            used_labels: dict[str, int] = {}
 
+            gf_label = build_method_label_latex(
+                "gradient_flow", gf_baseline["method_params"], gf_varying_keys
+            )
             ax.scatter(
                 gf_samples[:, 0],
                 gf_samples[:, 1],
                 s=float(plotting_cfg.get("scatter_size", 20)),
                 alpha=float(plotting_cfg.get("gf_alpha", 0.5)),
                 color=plotting_cfg.get("colors", {}).get("gradient_flow", "blue"),
-                label=f"gradient_flow | {format_params(gf_baseline['method_params'])}",
+                label=gf_label,
             )
+            used_labels[gf_label] = 1
 
             all_method_samples = []
             for idx, run in enumerate(method_runs):
@@ -576,6 +645,12 @@ def save_scatter_plots(
                 model = restore_model_from_run(run, checkpoint_root)
                 samples = generate_samples(model, dim, n_samples, seed=1000 + idx)
                 all_method_samples.append(samples)
+                label = build_method_label_latex(method, run["method_params"], method_varying_keys)
+                if label in used_labels:
+                    used_labels[label] += 1
+                    label = label[:-1] + rf"\;\mathrm{{(run\ {used_labels[label]})}}$"
+                else:
+                    used_labels[label] = 1
                 ax.scatter(
                     samples[:, 0],
                     samples[:, 1],
@@ -583,7 +658,7 @@ def save_scatter_plots(
                     alpha=float(plotting_cfg.get("method_alpha", 0.5)),
                     color=style["color"],
                     marker=style["marker"],
-                    label=f"{method} | {format_params(run['method_params'])}",
+                    label=label,
                 )
 
             try:
@@ -612,8 +687,8 @@ def save_scatter_plots(
             ax.set_xlabel("x[0]")
             ax.set_ylabel("x[1]")
             ax.grid(True)
-            ax.legend(fontsize=7)
-            fig.tight_layout()
+            ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0)
+            fig.tight_layout(rect=(0.0, 0.0, 0.78, 1.0))
             out = output_dir / f"{file_prefix}_{distribution}_{method}_scatter.pdf"
             fig.savefig(out)
             plt.close(fig)
