@@ -23,6 +23,7 @@ from num2tex import num2tex
 # TODO: proper installation
 root_path = Path.cwd().parent.absolute()
 import sys
+
 sys.path.append(str(root_path))
 
 
@@ -94,7 +95,9 @@ def distribution_grid(distributions_cfg: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
-def build_model(common: dict[str, Any], seed: int) -> tuple[ParametricModel, dict[str, Any]]:
+def build_model(
+    common: dict[str, Any], seed: int
+) -> tuple[ParametricModel, dict[str, Any]]:
     dim = int(common["dimension"])
     n_hidden = int(common["n_hidden"])
     width_hidden = int(common["width_hidden"])
@@ -136,7 +139,9 @@ def potential_double_banana(x: jnp.ndarray, shift: jnp.ndarray) -> jnp.ndarray:
     return log_density
 
 
-def build_problem(distribution_cfg: dict[str, Any], common: dict[str, Any]) -> tuple[Potential, dict[str, Any]]:
+def build_problem(
+    distribution_cfg: dict[str, Any], common: dict[str, Any]
+) -> tuple[Potential, dict[str, Any]]:
     dist_name = distribution_cfg["name"].lower()
     dim = int(common["dimension"])
 
@@ -150,9 +155,13 @@ def build_problem(distribution_cfg: dict[str, Any], common: dict[str, Any]) -> t
         else:
             sigma_diag = jnp.ones((dim,), dtype=jnp.float32)
             if dim >= 1:
-                sigma_diag = sigma_diag.at[0].set(float(distribution_cfg.get("sigma_first", 1000.0)))
+                sigma_diag = sigma_diag.at[0].set(
+                    float(distribution_cfg.get("sigma_first", 1000.0))
+                )
             if dim >= 2:
-                sigma_diag = sigma_diag.at[1].set(float(distribution_cfg.get("sigma_second", 10.0)))
+                sigma_diag = sigma_diag.at[1].set(
+                    float(distribution_cfg.get("sigma_second", 10.0))
+                )
         sigma_inv = jnp.diag(sigma_diag)
         potential_fn = get_gaussian_potential(mean, sigma_inv)
     elif dist_name in {"double-banana", "double_banana", "double banana"}:
@@ -177,7 +186,9 @@ def build_problem(distribution_cfg: dict[str, Any], common: dict[str, Any]) -> t
     internal_potential = InternalPotential(
         functional="entropy", coeff=1.0, method="exact", prob_dim=dim
     )
-    potential = Potential(linear=linear_potential, internal=internal_potential, interaction=None)
+    potential = Potential(
+        linear=linear_potential, internal=internal_potential, interaction=None
+    )
     return potential, {"distribution": distribution_cfg}
 
 
@@ -211,7 +222,9 @@ def build_plot_potential_2d(distribution_cfg: dict[str, Any]) -> LinearPotential
     return None
 
 
-def sample_reference(common: dict[str, Any], seed: int, n_samples: int | None = None) -> jnp.ndarray:
+def sample_reference(
+    common: dict[str, Any], seed: int, n_samples: int | None = None
+) -> jnp.ndarray:
     dim = int(common["dimension"])
     n = int(n_samples if n_samples is not None else common.get("plot_n_samples", 300))
     key = jax.random.PRNGKey(seed)
@@ -251,7 +264,9 @@ def run_single(
     stepsize = float(common["stepsize"])
     tolerance = float(common.get("tolerance", 1e-4))
     solver = common.get("linear_solver", "cg")
-    z_samples = sample_reference(common, run_seed + 13, n_samples=int(common.get("eval_samples", 300)))
+    z_samples = sample_reference(
+        common, run_seed + 13, n_samples=int(common.get("eval_samples", 300))
+    )
 
     t0 = time.perf_counter()
 
@@ -267,7 +282,9 @@ def run_single(
             max_iterations=int(method_params.get("max_iterations", max_iterations)),
             tolerance=float(method_params.get("tolerance", tolerance)),
             regularization=float(method_params.get("regularization", 1e-6)),
-            progress_every=int(method_params.get("progress_every", common.get("progress_every", 100))),
+            progress_every=int(
+                method_params.get("progress_every", common.get("progress_every", 100))
+            ),
         )
         final_model = history["final_parametric_model"]
         energies = np.asarray(history["energy_history"], dtype=np.float64)
@@ -293,10 +310,16 @@ def run_single(
             regularization=float(method_params.get("regularization", 1e-6)),
             convergence_tol=float(method_params.get("tolerance", tolerance)),
             plot_intermediate=False,
-            plot_frequency=int(method_params.get("progress_every", common.get("progress_every", 100))),
+            plot_frequency=int(
+                method_params.get("progress_every", common.get("progress_every", 100))
+            ),
             save_param_trajectory=False,
-            regularization_factor_gamma=float(method_params.get("regularization", 1e-3)),
-            regularization_method_gamma=str(method_params.get("regularization_kind", "l2")),
+            regularization_factor_gamma=float(
+                method_params.get("regularization", 1e-3)
+            ),
+            regularization_method_gamma=str(
+                method_params.get("regularization_kind", "l2")
+            ),
             ensure_descent=bool(method_params.get("ensure_descent", True)),
         )
         final_model = nnx.merge(graphdef, final_params)
@@ -317,7 +340,9 @@ def run_single(
             solver=str(method_params.get("solver", "cg")),
             solver_tol=float(method_params.get("solver_tol", tolerance)),
             solver_maxiter=int(method_params.get("solver_maxiter", 50)),
-            solver_regularization=float(method_params.get("solver_regularization", 1e-6)),
+            solver_regularization=float(
+                method_params.get("solver_regularization", 1e-6)
+            ),
             ensure_descent=bool(method_params.get("ensure_descent", False)),
             hessian_update_strategy=str(
                 method_params.get("hessian_update_strategy", "BFGS")
@@ -328,7 +353,9 @@ def run_single(
             spectral_scaling=bool(method_params.get("spectral_scaling", True)),
             convergence_tol=float(method_params.get("tolerance", tolerance)),
             plot_intermediate=False,
-            plot_frequency=int(method_params.get("progress_every", common.get("progress_every", 100))),
+            plot_frequency=int(
+                method_params.get("progress_every", common.get("progress_every", 100))
+            ),
             save_param_trajectory=False,
         )
         final_model = nnx.merge(graphdef, final_params)
@@ -373,7 +400,9 @@ def append_run_to_h5(path: Path, run_id: str, run: dict[str, Any]) -> None:
         grp = runs_grp.create_group(run_id)
         grp.attrs["method"] = run["method"]
         grp.attrs["distribution"] = run["distribution"]["name"]
-        grp.attrs["method_params_json"] = json.dumps(run["method_params"], sort_keys=True)
+        grp.attrs["method_params_json"] = json.dumps(
+            run["method_params"], sort_keys=True
+        )
         grp.attrs["model_config_json"] = json.dumps(run["model_config"], sort_keys=True)
         grp.attrs["common_json"] = json.dumps(run["common"], sort_keys=True)
         grp.attrs["runtime_sec"] = float(run["runtime_sec"])
@@ -400,8 +429,12 @@ def load_runs_from_h5(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]
                     "common": json.loads(str(grp.attrs["common_json"])),
                     "runtime_sec": float(grp.attrs["runtime_sec"]),
                     "model_ckpt_relpath": str(grp.attrs["model_ckpt_relpath"]),
-                    "energy_history": np.asarray(grp["energy_history"][:], dtype=np.float64),
-                    "riemann_grad_history": np.asarray(grp["riemann_grad_history"][:], dtype=np.float64),
+                    "energy_history": np.asarray(
+                        grp["energy_history"][:], dtype=np.float64
+                    ),
+                    "riemann_grad_history": np.asarray(
+                        grp["riemann_grad_history"][:], dtype=np.float64
+                    ),
                 }
             )
     return config, out
@@ -467,7 +500,9 @@ def build_method_label_latex(
     method_tex = rf"\mathrm{{{method.replace('_', r'\_')}}}"
     if not varying_keys:
         return rf"${method_tex}$"
-    parts = [f"{latex_key(k)}={latex_value(params[k])}" for k in varying_keys if k in params]
+    parts = [
+        f"{latex_key(k)}={latex_value(params[k])}" for k in varying_keys if k in params
+    ]
     return rf"${method_tex}\;|\;" + r",\;".join(parts) + "$"
 
 
@@ -488,6 +523,21 @@ def style_for_run(
     }
 
 
+def dynamic_legend_layout(labels: list[str], fig_width: float) -> tuple[int, float]:
+    n = max(1, len(labels))
+    max_chars = max((len(lbl) for lbl in labels), default=20)
+    ncol = int(n**0.5)
+
+    # Keep total legend width inside figure width.
+    # TODO: 0.035 char width found empirically. find a right way to compute it
+    est_col_width = 0.035 * (max_chars + 1)
+    ncol = min(int(0.95 * fig_width / est_col_width), ncol)
+
+    nrows = int(np.ceil(n / ncol))
+    bottom = float(np.clip(0.06 + 0.05 * nrows, 0.08, 0.35))
+    return ncol, bottom
+
+
 def save_convergence_plots(
     runs: list[dict[str, Any]],
     plotting_cfg: dict[str, Any],
@@ -505,7 +555,9 @@ def save_convergence_plots(
             for method, method_runs in method_runs_map.items()
         }
 
-        fig, axes = plt.subplots(1, 2, figsize=tuple(plotting_cfg.get("figsize", [16, 6])))
+        fig, axes = plt.subplots(
+            1, 2, figsize=tuple(plotting_cfg.get("figsize", [16, 6]))
+        )
 
         per_method_counts: dict[str, int] = {}
         used_labels: dict[str, int] = {}
@@ -514,7 +566,9 @@ def save_convergence_plots(
             idx = per_method_counts.get(m, 0)
             per_method_counts[m] = idx + 1
             style = style_for_run(plotting_cfg, m, idx)
-            label = build_method_label_latex(m, run["method_params"], varying_keys_map[m])
+            label = build_method_label_latex(
+                m, run["method_params"], varying_keys_map[m]
+            )
             if label in used_labels:
                 used_labels[label] += 1
                 label = label[:-1] + rf"\;\mathrm{{(run\ {used_labels[label]})}}$"
@@ -545,14 +599,26 @@ def save_convergence_plots(
         axes[1].set_ylabel("riemann grad norm")
         axes[0].grid(True)
         axes[1].grid(True)
-        axes[1].legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0)
-        fig.tight_layout(rect=(0.0, 0.0, 0.82, 1.0))
+        handles, labels = axes[1].get_legend_handles_labels()
+        ncol, bottom = dynamic_legend_layout(labels, fig.get_size_inches()[0])
+        fig.legend(
+            handles,
+            labels,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.0),
+            ncol=ncol,
+            frameon=True,
+        )
+        fig.tight_layout()
+        fig.subplots_adjust(bottom=bottom)
         out = output_dir / f"{file_prefix}_{distribution}_convergence.pdf"
         fig.savefig(out)
         plt.close(fig)
 
 
-def restore_model_from_run(run: dict[str, Any], checkpoint_root: Path) -> ParametricModel:
+def restore_model_from_run(
+    run: dict[str, Any], checkpoint_root: Path
+) -> ParametricModel:
     seed = int(run["model_config"].get("seed", 0))
     model = ParametricModel(
         parametric_map=run["model_config"]["parametric_map"],
@@ -573,12 +639,16 @@ def restore_model_from_run(run: dict[str, Any], checkpoint_root: Path) -> Parame
             f"Missing checkpoint for run {run.get('run_id', '<unknown>')}: {ckpt_path}"
         )
     checkpointer = ocp.PyTreeCheckpointer()
-    restored_state = checkpointer.restore(str(ckpt_path.absolute()), item=template_state)
+    restored_state = checkpointer.restore(
+        str(ckpt_path.absolute()), item=template_state
+    )
     nnx.update(model, restored_state)
     return model
 
 
-def generate_samples(model: ParametricModel, dim: int, n_samples: int, seed: int) -> np.ndarray:
+def generate_samples(
+    model: ParametricModel, dim: int, n_samples: int, seed: int
+) -> np.ndarray:
     key = jax.random.PRNGKey(seed)
     z = jax.random.normal(key, (n_samples, dim))
     x = model(z)
@@ -616,13 +686,17 @@ def save_scatter_plots(
         gf_model = restore_model_from_run(gf_baseline, checkpoint_root)
         gf_samples = generate_samples(gf_model, dim, n_samples, seed=123)
 
-        methods = sorted({run["method"] for run in dist_runs if run["method"] != "gradient_flow"})
+        methods = sorted(
+            {run["method"] for run in dist_runs if run["method"] != "gradient_flow"}
+        )
         for method in methods:
             method_runs = [run for run in dist_runs if run["method"] == method]
             if not method_runs:
                 continue
 
-            fig, ax = plt.subplots(figsize=tuple(plotting_cfg.get("scatter_figsize", [8, 8])))
+            fig, ax = plt.subplots(
+                figsize=tuple(plotting_cfg.get("scatter_figsize", [8, 8]))
+            )
             method_varying_keys = get_varying_keys(method_runs)
             used_labels: dict[str, int] = {}
 
@@ -645,7 +719,9 @@ def save_scatter_plots(
                 model = restore_model_from_run(run, checkpoint_root)
                 samples = generate_samples(model, dim, n_samples, seed=1000 + idx)
                 all_method_samples.append(samples)
-                label = build_method_label_latex(method, run["method_params"], method_varying_keys)
+                label = build_method_label_latex(
+                    method, run["method_params"], method_varying_keys
+                )
                 if label in used_labels:
                     used_labels[label] += 1
                     label = label[:-1] + rf"\;\mathrm{{(run\ {used_labels[label]})}}$"
@@ -665,7 +741,10 @@ def save_scatter_plots(
                 dist_cfg = get_dist_cfg(config, distribution)
                 plot_pot = build_plot_potential_2d(dist_cfg)
                 if plot_pot is not None:
-                    joint = np.concatenate([gf_samples[:, :2]] + [s[:, :2] for s in all_method_samples], axis=0)
+                    joint = np.concatenate(
+                        [gf_samples[:, :2]] + [s[:, :2] for s in all_method_samples],
+                        axis=0,
+                    )
                     low = np.min(joint, axis=0)
                     high = np.max(joint, axis=0)
                     margin = 0.2 * np.maximum(high - low, 1e-3)
@@ -687,8 +766,18 @@ def save_scatter_plots(
             ax.set_xlabel("x[0]")
             ax.set_ylabel("x[1]")
             ax.grid(True)
-            ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0)
-            fig.tight_layout(rect=(0.0, 0.0, 0.78, 1.0))
+            handles, labels = ax.get_legend_handles_labels()
+            ncol, bottom = dynamic_legend_layout(labels, fig.get_size_inches()[0])
+            fig.legend(
+                handles,
+                labels,
+                loc="lower center",
+                bbox_to_anchor=(0.5, 0.0),
+                ncol=ncol,
+                frameon=True,
+            )
+            fig.tight_layout()
+            fig.subplots_adjust(bottom=bottom)
             out = output_dir / f"{file_prefix}_{distribution}_{method}_scatter.pdf"
             fig.savefig(out)
             plt.close(fig)
@@ -808,8 +897,12 @@ def main() -> None:
             )
         digest = hashlib.sha1(str(h5_path).encode("utf-8")).hexdigest()[:8]
         prefix = f"{experiment_name}_{digest}"
-        save_convergence_plots(loaded_runs, loaded_config["plotting"], output_dir, prefix)
-        save_scatter_plots(loaded_config, loaded_runs, h5_path.parent, output_dir, prefix)
+        save_convergence_plots(
+            loaded_runs, loaded_config["plotting"], output_dir, prefix
+        )
+        save_scatter_plots(
+            loaded_config, loaded_runs, h5_path.parent, output_dir, prefix
+        )
         print("[done] plots regenerated")
         return
 
@@ -818,8 +911,12 @@ def main() -> None:
     digest = hashlib.sha1(str(output_h5).encode("utf-8")).hexdigest()[:8]
     prefix = f"{experiment_name}_{digest}"
     config_for_scatter, runs_for_scatter = load_runs_from_h5(output_h5)
-    save_convergence_plots(runs_for_scatter, config_for_scatter["plotting"], output_dir, prefix)
-    save_scatter_plots(config_for_scatter, runs_for_scatter, output_h5.parent, output_dir, prefix)
+    save_convergence_plots(
+        runs_for_scatter, config_for_scatter["plotting"], output_dir, prefix
+    )
+    save_scatter_plots(
+        config_for_scatter, runs_for_scatter, output_h5.parent, output_dir, prefix
+    )
     print(f"[done] successful runs: {stats['success']}, failed runs: {stats['failed']}")
     print(f"[done] results saved to {output_h5}")
 
