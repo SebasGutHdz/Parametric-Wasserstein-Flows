@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flax import nnx
 from jaxtyping import Array, PyTree
-from typing import Tuple, List, Dict, Optional, Literal
+from typing import Tuple, List, Dict, Optional, Literal, Callable, Any
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jla
@@ -46,6 +46,8 @@ def memoryless_qn_method(
     plot_intermediate=False,
     plot_frequency: int = 10,
     save_param_trajectory=False,
+    verbose: bool = True,
+    progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> Tuple[PyTree, Dict]:
     """
     Memoryless quasi-Newton method for Wasserstein gradient flow.
@@ -67,12 +69,13 @@ def memoryless_qn_method(
 
     converged = False
 
-    print(f"Starting memoryless qN method")
-    print(f"  n_iterations: {n_iterations}")
-    print(f"  step_size: {step_size}")
-    print(f"  hessian strategy: {hessian_update_strategy}")
-    print(f"  regularization strategy: {regularization_strategy}")
-    print("-" * 60)
+    if verbose:
+        print(f"Starting memoryless qN method")
+        print(f"  n_iterations: {n_iterations}")
+        print(f"  step_size: {step_size}")
+        print(f"  hessian strategy: {hessian_update_strategy}")
+        print(f"  regularization strategy: {regularization_strategy}")
+        print("-" * 60)
 
     # evaluate initial energy
     key, subkey = jax.random.split(key)
@@ -134,8 +137,20 @@ def memoryless_qn_method(
         residual_norms.append(float(residual_norm))
         energy_trajectory.append(float(energy))
 
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "method": "memoryless_qn",
+                    "iteration": iteration,
+                    "max_iterations": n_iterations,
+                    "energy": float(energy),
+                    "riemann_grad_norm": float(residual_norm / step_size),
+                    "converged": False,
+                }
+            )
+
         # Print progress
-        if iteration % plot_frequency == 0 or iteration < 5:
+        if (iteration % plot_frequency == 0 or iteration < 5) and verbose:
             print(
                 f"Iter {iteration:4d} | "
                 f"Energy: {energy:12.6e} | "
@@ -164,18 +179,20 @@ def memoryless_qn_method(
         if residual_norm < convergence_tol:
             converged = True
 
-            print("-" * 60)
-            print(f"Converged at iteration {iteration}!")
-            print(f"Final residual norm: {residual_norm:.6e}")
-            print(f"Final energy: {energy:.6e}")
+            if verbose:
+                print("-" * 60)
+                print(f"Converged at iteration {iteration}!")
+                print(f"Final residual norm: {residual_norm:.6e}")
+                print(f"Final energy: {energy:.6e}")
             break
 
     # Final message if not converged
     if not converged:
-        print("-" * 60)
-        print(f"Reached maximum iterations ({n_iterations})")
-        print(f"Final residual norm: {residual_norms[-1]:.6e}")
-        print(f"Final energy: {energy_trajectory[-1]:.6e}")
+        if verbose:
+            print("-" * 60)
+            print(f"Reached maximum iterations ({n_iterations})")
+            print(f"Final residual norm: {residual_norms[-1]:.6e}")
+            print(f"Final energy: {energy_trajectory[-1]:.6e}")
 
     # Build history dictionary
     history = {

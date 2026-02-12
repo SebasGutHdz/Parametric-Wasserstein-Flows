@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flax import nnx
 from jaxtyping import Array, PyTree
-from typing import Tuple, Any
+from typing import Tuple, Any, Optional, Callable
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -43,6 +43,10 @@ def run_gradient_flow(
     tolerance: float = 1e-6,
     regularization: float = 1e-6,
     progress_every: int = 10,
+    plot_intermediate: bool = True,
+    verbose: bool = True,
+    use_tqdm: bool = True,
+    progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> dict:
     """
     Run complete gradient flow integration with any LinearPotential
@@ -77,9 +81,10 @@ def run_gradient_flow(
     key = jax.random.PRNGKey(0)
     # with jax.default_device(device):
 
-    p_bar = tqdm(range(max_iterations), desc="Gradient Flow Progress")
+    p_bar = tqdm(range(max_iterations), desc="Gradient Flow Progress") if use_tqdm else None
+    iterator = p_bar if p_bar is not None else range(max_iterations)
 
-    for iteration in p_bar:
+    for iteration in iterator:
 
         if iteration == 0:
             _, samples0, _, _, _ = potential.evaluate_energy(
@@ -116,14 +121,27 @@ def run_gradient_flow(
         euclid_grad_norm_history.append(step_info["gradient_norm"])
         riemann_grad_norm_history.append(step_info["riemann_gradient_norm"])
 
-        p_bar.set_postfix(
-            {
-                "Energy": f"{step_info['energy']:.6f}",
-                "Linear": f"{step_info['linear_energy']:.6f}",
-                "Internal": f"{step_info['internal_energy']:.6f}",
-                "Interaction": f"{step_info['interaction_energy']:.6f}",
-            }
-        )
+        if p_bar is not None:
+            p_bar.set_postfix(
+                {
+                    "Energy": f"{step_info['energy']:.6f}",
+                    "Linear": f"{step_info['linear_energy']:.6f}",
+                    "Internal": f"{step_info['internal_energy']:.6f}",
+                    "Interaction": f"{step_info['interaction_energy']:.6f}",
+                }
+            )
+
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "method": "gradient_flow",
+                    "iteration": iteration,
+                    "max_iterations": max_iterations,
+                    "energy": float(step_info["energy"]),
+                    "riemann_grad_norm": float(step_info["riemann_gradient_norm"]),
+                    "converged": False,
+                }
+            )
 
         # Progress reporting
         if iteration % progress_every == 0 and iteration > 0:
@@ -131,27 +149,29 @@ def run_gradient_flow(
                 current_parametric_model, z_samples, current_params
             )
             sample_history.append(samples1)
-            print(
-                f"Iter {iteration:3d}: Energy = {step_info['energy']:.6f}, "
-                f"Grad norm: {step_info['gradient_norm']:.2e}"
-            )
-
-            try:
-                fig = plot_gradient_flow(
-                    samples0,
-                    samples1,
-                    potential,
-                    current_energy,
-                    iteration,
-                    progress_every,
+            if verbose:
+                print(
+                    f"Iter {iteration:3d}: Energy = {step_info['energy']:.6f}, "
+                    f"Grad norm: {step_info['gradient_norm']:.2e}"
                 )
-                plt.tight_layout()
-                plt.show()
-                plt.close(fig)
-                # Update previous samples
-            except Exception as e:
-                print("PLotting failed due to the folowwing error:")
-                print(e)
+
+            if plot_intermediate:
+                try:
+                    fig = plot_gradient_flow(
+                        samples0,
+                        samples1,
+                        potential,
+                        current_energy,
+                        iteration,
+                        progress_every,
+                    )
+                    plt.tight_layout()
+                    plt.show()
+                    plt.close(fig)
+                except Exception as e:
+                    if verbose:
+                        print("Plotting failed due to the following error:")
+                        print(e)
             samples0 = samples1
         if iteration == 0:
             # for plotting sample at previous checkpoint vs current
@@ -160,15 +180,20 @@ def run_gradient_flow(
             )
         # Early stopping conditions
         if iteration > 1 and jnp.abs(current_energy) < tolerance:
-            print(f"Converged! Energy below tolerance at iteration {iteration}")
+            if verbose:
+                print(f"Converged! Energy below tolerance at iteration {iteration}")
             break
 
         if (
             iteration > 5
             and abs(energy_history[-1] - energy_history[-2]) < tolerance * 1e-2
         ):
-            print(f"Energy increment below tolerance at {iteration}")
+            if verbose:
+                print(f"Energy increment below tolerance at {iteration}")
             break
+
+    if p_bar is not None:
+        p_bar.close()
 
     # eval energy of the final iterate
     final_energy, samples0, _, _, _ = potential.evaluate_energy(
@@ -180,13 +205,14 @@ def run_gradient_flow(
     energy_history.append(final_energy)
     total_decrease = energy_history[0] - final_energy
 
-    print(f"\n=== Integration Complete ===")
-    print(f"Total iterations:    {len(energy_history)-1}")
-    print(f"Initial energy:      {energy_history[0]:.6f}")
-    print(f"Final energy:        {final_energy:.6f}")
-    print(f"Total decrease:      {total_decrease:.6f}")
-    print(f"Reduction ratio:     {final_energy/energy_history[0]:.4f}")
-    print(f"Final param norm:    {param_norms[-1]:.6f}")
+    if verbose:
+        print(f"\n=== Integration Complete ===")
+        print(f"Total iterations:    {len(energy_history)-1}")
+        print(f"Initial energy:      {energy_history[0]:.6f}")
+        print(f"Final energy:        {final_energy:.6f}")
+        print(f"Total decrease:      {total_decrease:.6f}")
+        print(f"Reduction ratio:     {final_energy/energy_history[0]:.4f}")
+        print(f"Final param norm:    {param_norms[-1]:.6f}")
 
     return {
         "final_parametric_model": current_parametric_model,

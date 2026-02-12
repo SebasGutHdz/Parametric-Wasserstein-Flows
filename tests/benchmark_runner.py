@@ -7,7 +7,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import h5py
 import jax
@@ -19,6 +19,7 @@ from flax import nnx
 from flax.training import orbax_utils
 from jax.scipy.special import logsumexp
 from num2tex import num2tex
+from tqdm.auto import tqdm
 
 # TODO: proper installation
 root_path = Path.cwd().parent.absolute()
@@ -254,6 +255,7 @@ def run_single(
     checkpoint_root: Path,
     run_namespace: str,
     run_id: str,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     model, model_cfg = build_model(common, run_seed)
     potential, potential_meta = build_problem(distribution_cfg, common)
@@ -285,6 +287,10 @@ def run_single(
             progress_every=int(
                 method_params.get("progress_every", common.get("progress_every", 100))
             ),
+            plot_intermediate=bool(method_params.get("plot_intermediate", False)),
+            verbose=bool(method_params.get("verbose", False)),
+            use_tqdm=bool(method_params.get("use_tqdm", False)),
+            progress_callback=progress_callback,
         )
         final_model = history["final_parametric_model"]
         energies = np.asarray(history["energy_history"], dtype=np.float64)
@@ -321,6 +327,8 @@ def run_single(
                 method_params.get("regularization_kind", "l2")
             ),
             ensure_descent=bool(method_params.get("ensure_descent", True)),
+            verbose=bool(method_params.get("verbose", False)),
+            progress_callback=progress_callback,
         )
         final_model = nnx.merge(graphdef, final_params)
         energies = np.asarray(history["energies"], dtype=np.float64)
@@ -357,6 +365,8 @@ def run_single(
                 method_params.get("progress_every", common.get("progress_every", 100))
             ),
             save_param_trajectory=False,
+            verbose=bool(method_params.get("verbose", False)),
+            progress_callback=progress_callback,
         )
         final_model = nnx.merge(graphdef, final_params)
         energies = np.asarray(history["energies"], dtype=np.float64)
@@ -536,6 +546,40 @@ def dynamic_legend_layout(labels: list[str], fig_width: float) -> tuple[int, flo
     nrows = int(np.ceil(n / ncol))
     bottom = float(np.clip(0.06 + 0.05 * nrows, 0.08, 0.35))
     return ncol, bottom
+
+
+def save_live_convergence_plot(
+    energy_history: list[float],
+    riemann_grad_history: list[float],
+    out_path: Path,
+    title: str,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    if energy_history:
+        e = np.asarray(energy_history, dtype=np.float64)
+        axes[0].plot(e, color="#1f77b4", linewidth=1.8)
+        if np.all(e > 0):
+            axes[0].set_yscale("log")
+    if riemann_grad_history:
+        g = np.asarray(riemann_grad_history, dtype=np.float64)
+        axes[1].plot(g, color="#d62728", linewidth=1.8)
+        if np.all(g > 0):
+            axes[1].set_yscale("log")
+
+    axes[0].set_title("Energy")
+    axes[1].set_title("Riemannian gradient norm")
+    axes[0].set_xlabel("iteration")
+    axes[1].set_xlabel("iteration")
+    axes[0].set_ylabel("energy")
+    axes[1].set_ylabel("grad norm")
+    axes[0].grid(True)
+    axes[1].grid(True)
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
 
 
 def save_convergence_plots(
@@ -799,46 +843,116 @@ def run_all(config: dict[str, Any], output_h5: Path) -> dict[str, int]:
     base_seed = int(common.get("seed", 0))
     ckpt_root = output_h5.parent / "model_checkpoints" / output_h5.stem
     ckpt_root.mkdir(parents=True, exist_ok=True)
+    live_root = output_h5.parent / "live" / output_h5.stem
+    live_plot_every = max(1, int(common.get("live_plot_every", 20)))
+    total_runs = len(dist_cfgs) * sum(
+        len(method_grid(m_cfg)) for m_cfg in config["methods"].values()
+    )
     initialize_h5(output_h5, config)
 
     run_counter = 0
     success_count = 0
     failed_count = 0
     fail_fast = bool(config.get("fail_fast", False))
-    for dist in dist_cfgs:
-        for method, m_cfg in config["methods"].items():
-            for params in method_grid(m_cfg):
-                params = dict(params)
-                params.setdefault("stepsize", common["stepsize"])
-                params.setdefault("max_iterations", common.get("max_iterations", 300))
-                params.setdefault("tolerance", common.get("tolerance", 1e-4))
-                print(
-                    f"[run] dist={dist['name']} method={method} "
-                    f"params={json.dumps(params, sort_keys=True)}"
-                )
-                run_id = f"run_{run_counter:04d}"
-                try:
-                    run = run_single(
-                        method=method,
-                        method_params=params,
-                        distribution_cfg=dist,
-                        common=common,
-                        run_seed=base_seed + run_counter,
-                        checkpoint_root=output_h5.parent,
-                        run_namespace=output_h5.stem,
-                        run_id=run_id,
+    outer_bar = tqdm(total=total_runs, desc="Benchmark", position=0, leave=True, unit="run")
+    try:
+        for dist in dist_cfgs:
+            for method, m_cfg in config["methods"].items():
+                for params in method_grid(m_cfg):
+                    params = dict(params)
+                    params.setdefault("stepsize", common["stepsize"])
+                    params.setdefault("max_iterations", common.get("max_iterations", 300))
+                    params.setdefault("tolerance", common.get("tolerance", 1e-4))
+                    run_id = f"run_{run_counter:04d}"
+                    run_name = f"{dist['name']} | {method} | {run_id}"
+                    inner_total = int(params.get("max_iterations", common.get("max_iterations", 300)))
+                    inner_bar = tqdm(
+                        total=inner_total,
+                        desc=run_name,
+                        position=1,
+                        leave=False,
+                        unit="iter",
                     )
-                    append_run_to_h5(output_h5, run_id, run)
-                    success_count += 1
-                except Exception as exc:
-                    failed_count += 1
-                    print(f"[error] run {run_id} failed: {exc}")
-                    if fail_fast:
-                        raise
-                finally:
-                    run_counter += 1
-                    jax.clear_caches()
-                    gc.collect()
+
+                    live_plot_path = (
+                        live_root
+                        / f"{run_id}_{dist['name'].replace(' ', '_')}_{method}_convergence.png"
+                    )
+                    live_energy: list[float] = []
+                    live_grad: list[float] = []
+                    last_saved_at = 0
+
+                    def on_progress(info: dict[str, Any]) -> None:
+                        nonlocal last_saved_at
+                        iteration = int(info.get("iteration", 0)) + 1
+                        delta = iteration - inner_bar.n
+                        if delta > 0:
+                            inner_bar.update(delta)
+
+                        energy = float(info.get("energy", np.nan))
+                        grad = float(info.get("riemann_grad_norm", np.nan))
+                        if np.isfinite(energy):
+                            live_energy.append(energy)
+                        if np.isfinite(grad):
+                            live_grad.append(grad)
+
+                        if np.isfinite(energy) and np.isfinite(grad):
+                            inner_bar.set_postfix_str(f"E={energy:.3e} G={grad:.3e}")
+                        elif np.isfinite(energy):
+                            inner_bar.set_postfix_str(f"E={energy:.3e}")
+
+                        if iteration % live_plot_every == 0 and iteration != last_saved_at:
+                            save_live_convergence_plot(
+                                live_energy,
+                                live_grad,
+                                live_plot_path,
+                                title=run_name,
+                            )
+                            last_saved_at = iteration
+
+                    try:
+                        run = run_single(
+                            method=method,
+                            method_params=params,
+                            distribution_cfg=dist,
+                            common=common,
+                            run_seed=base_seed + run_counter,
+                            checkpoint_root=output_h5.parent,
+                            run_namespace=output_h5.stem,
+                            run_id=run_id,
+                            progress_callback=on_progress,
+                        )
+                        append_run_to_h5(output_h5, run_id, run)
+                        success_count += 1
+                        save_live_convergence_plot(
+                            list(np.asarray(run["energy_history"], dtype=np.float64)),
+                            list(np.asarray(run["riemann_grad_history"], dtype=np.float64)),
+                            live_plot_path,
+                            title=run_name,
+                        )
+                    except Exception as exc:
+                        failed_count += 1
+                        tqdm.write(f"[error] run {run_id} failed: {exc}")
+                        if live_energy or live_grad:
+                            save_live_convergence_plot(
+                                live_energy,
+                                live_grad,
+                                live_plot_path,
+                                title=f"{run_name} (failed)",
+                            )
+                        if fail_fast:
+                            raise
+                    finally:
+                        inner_bar.close()
+                        run_counter += 1
+                        outer_bar.update(1)
+                        outer_bar.set_postfix_str(
+                            f"ok={success_count} fail={failed_count}"
+                        )
+                        jax.clear_caches()
+                        gc.collect()
+    finally:
+        outer_bar.close()
 
     return {"success": success_count, "failed": failed_count}
 

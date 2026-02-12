@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flax import nnx
 from jaxtyping import Array, PyTree
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict, Optional, Callable, Any
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jla
@@ -44,6 +44,8 @@ def anderson_method(
     regularization_factor_gamma: float = 1e-6,
     regularization_method_gamma: float = 1e-6,
     ensure_descent: bool=False,
+    verbose: bool = True,
+    progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> Tuple[PyTree, Dict]:
     """
     Anderson-accelerated gradient flow method for Wasserstein gradient flow.
@@ -105,12 +107,13 @@ def anderson_method(
 
     converged = False
 
-    print(f"Starting Anderson-accelerated gradient flow")
-    print(f"  n_iterations: {n_iterations}")
-    print(f"  step_size: {step_size}")
-    print(f"  memory_size: {memory_size}")
-    print(f"  mixing_parameter: {relaxation}")
-    print("-" * 60)
+    if verbose:
+        print(f"Starting Anderson-accelerated gradient flow")
+        print(f"  n_iterations: {n_iterations}")
+        print(f"  step_size: {step_size}")
+        print(f"  memory_size: {memory_size}")
+        print(f"  mixing_parameter: {relaxation}")
+        print("-" * 60)
 
     # evaluate initial energy
     key, subkey = jax.random.split(key)
@@ -186,7 +189,19 @@ def anderson_method(
         energy_trajectory.append(float(energy))
 
         # Print progress
-        if iteration % plot_frequency == 0 or iteration < 5:
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "method": "anderson",
+                    "iteration": iteration,
+                    "max_iterations": n_iterations,
+                    "energy": float(energy),
+                    "riemann_grad_norm": float(residual_norm / step_size),
+                    "converged": False,
+                }
+            )
+
+        if (iteration % plot_frequency == 0 or iteration < 5) and verbose:
             print(
                 f"Iter {iteration:4d} | "
                 f"Energy: {energy:12.6e} | "
@@ -215,18 +230,20 @@ def anderson_method(
         if residual_norm < convergence_tol:
             converged = True
 
-            print("-" * 60)
-            print(f"Converged at iteration {iteration}!")
-            print(f"Final residual norm: {residual_norm:.6e}")
-            print(f"Final energy: {energy:.6e}")
+            if verbose:
+                print("-" * 60)
+                print(f"Converged at iteration {iteration}!")
+                print(f"Final residual norm: {residual_norm:.6e}")
+                print(f"Final energy: {energy:.6e}")
             break
 
     # Final message if not converged
     if not converged:
-        print("-" * 60)
-        print(f"Reached maximum iterations ({n_iterations})")
-        print(f"Final residual norm: {residual_norms[-1]:.6e}")
-        print(f"Final energy: {energy_trajectory[-1]:.6e}")
+        if verbose:
+            print("-" * 60)
+            print(f"Reached maximum iterations ({n_iterations})")
+            print(f"Final residual norm: {residual_norms[-1]:.6e}")
+            print(f"Final energy: {energy_trajectory[-1]:.6e}")
 
     # Build history dictionary
     history = {
