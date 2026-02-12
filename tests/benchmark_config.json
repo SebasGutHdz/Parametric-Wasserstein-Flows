@@ -1,5 +1,6 @@
 {
   "experiment_name": "method_benchmark",
+  "output_root": "results/benchmarks",
   "common_params": {
     "seed": 0,
     "dimension": 2,

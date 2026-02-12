@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import gc
-import hashlib
 import itertools
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -82,6 +82,10 @@ def method_grid(method_cfg: dict[str, Any]) -> list[dict[str, Any]]:
     for product in itertools.product(*values):
         combos.append(dict(zip(keys, product, strict=False)))
     return combos
+
+
+def sanitize_component(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]+", "_", str(name).strip().lower())
 
 
 def distribution_grid(distributions_cfg: list[Any]) -> list[dict[str, Any]]:
@@ -253,7 +257,6 @@ def run_single(
     common: dict[str, Any],
     run_seed: int,
     checkpoint_root: Path,
-    run_namespace: str,
     run_id: str,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -376,7 +379,7 @@ def run_single(
 
     runtime_sec = time.perf_counter() - t0
 
-    ckpt_relpath = Path("model_checkpoints") / run_namespace / run_id
+    ckpt_relpath = Path("model_checkpoints") / run_id
     save_model_checkpoint(final_model, checkpoint_root / ckpt_relpath)
 
     return {
@@ -586,7 +589,6 @@ def save_convergence_plots(
     runs: list[dict[str, Any]],
     plotting_cfg: dict[str, Any],
     output_dir: Path,
-    file_prefix: str,
 ) -> None:
     distributions = sorted({run["distribution"] for run in runs})
     for distribution in distributions:
@@ -655,7 +657,8 @@ def save_convergence_plots(
         )
         fig.tight_layout()
         fig.subplots_adjust(bottom=bottom)
-        out = output_dir / f"{file_prefix}_{distribution}_convergence.pdf"
+        dist_slug = sanitize_component(distribution)
+        out = output_dir / f"{dist_slug}__all_methods__run_all__convergence.pdf"
         fig.savefig(out)
         plt.close(fig)
 
@@ -711,7 +714,6 @@ def save_scatter_plots(
     runs: list[dict[str, Any]],
     checkpoint_root: Path,
     output_dir: Path,
-    file_prefix: str,
 ) -> None:
     plotting_cfg = config.get("plotting", {})
     common = config["common_params"]
@@ -822,29 +824,48 @@ def save_scatter_plots(
             )
             fig.tight_layout()
             fig.subplots_adjust(bottom=bottom)
-            out = output_dir / f"{file_prefix}_{distribution}_{method}_scatter.pdf"
+            dist_slug = sanitize_component(distribution)
+            method_slug = sanitize_component(method)
+            out = output_dir / f"{dist_slug}__{method_slug}__run_all__scatter.pdf"
             fig.savefig(out)
             plt.close(fig)
 
 
-def choose_output_h5(output_dir: Path, experiment_name: str) -> Path:
+def create_benchmark_session_dir(output_root: Path) -> Path:
     ts = time.strftime("%Y%m%d_%H%M%S")
-    return output_dir / f"{experiment_name}_{ts}.h5"
+    session_dir = output_root / ts
+    session_dir.mkdir(parents=True, exist_ok=False)
+    return session_dir
 
 
-def latest_h5(output_dir: Path) -> Path | None:
-    files = sorted(output_dir.glob("*.h5"), key=lambda p: p.stat().st_mtime)
+def latest_h5(output_root: Path) -> Path | None:
+    files = sorted(output_root.glob("**/results.h5"), key=lambda p: p.stat().st_mtime)
     return files[-1] if files else None
 
 
-def run_all(config: dict[str, Any], output_h5: Path) -> dict[str, int]:
+def run_all(config: dict[str, Any], benchmark_dir: Path) -> dict[str, int]:
     common = config["common_params"]
     dist_cfgs = distribution_grid(config["distributions"])
     base_seed = int(common.get("seed", 0))
-    ckpt_root = output_h5.parent / "model_checkpoints" / output_h5.stem
+    output_h5 = benchmark_dir / "results.h5"
+    ckpt_root = benchmark_dir / "model_checkpoints"
+    plots_root = benchmark_dir / "plots"
+    diagnostic_root = benchmark_dir / "diagnostic_plots"
     ckpt_root.mkdir(parents=True, exist_ok=True)
-    live_root = output_h5.parent / "live" / output_h5.stem
+    plots_root.mkdir(parents=True, exist_ok=True)
+    diagnostic_root.mkdir(parents=True, exist_ok=True)
     live_plot_every = max(1, int(common.get("live_plot_every", 20)))
+    varying_keys_lookup: dict[tuple[str, str], list[str]] = {}
+    for dist in dist_cfgs:
+        for method, m_cfg in config["methods"].items():
+            planned_runs: list[dict[str, Any]] = []
+            for params in method_grid(m_cfg):
+                p = dict(params)
+                p.setdefault("stepsize", common["stepsize"])
+                p.setdefault("max_iterations", common.get("max_iterations", 300))
+                p.setdefault("tolerance", common.get("tolerance", 1e-4))
+                planned_runs.append({"method_params": p})
+            varying_keys_lookup[(dist["name"], method)] = get_varying_keys(planned_runs)
     total_runs = len(dist_cfgs) * sum(
         len(method_grid(m_cfg)) for m_cfg in config["methods"].values()
     )
@@ -863,8 +884,18 @@ def run_all(config: dict[str, Any], output_h5: Path) -> dict[str, int]:
                     params.setdefault("stepsize", common["stepsize"])
                     params.setdefault("max_iterations", common.get("max_iterations", 300))
                     params.setdefault("tolerance", common.get("tolerance", 1e-4))
-                    run_id = f"run_{run_counter:04d}"
+                    dist_slug = sanitize_component(dist["name"])
+                    method_slug = sanitize_component(method)
+                    run_id = f"{dist_slug}__{method_slug}__run_{run_counter:04d}"
                     run_name = f"{dist['name']} | {method} | {run_id}"
+                    run_method_label = build_method_label_latex(
+                        method,
+                        params,
+                        varying_keys_lookup[(dist["name"], method)],
+                    )
+                    run_diagnostic_title = (
+                        f"{dist['name']} | {run_id}\n{run_method_label}"
+                    )
                     inner_total = int(params.get("max_iterations", common.get("max_iterations", 300)))
                     inner_bar = tqdm(
                         total=inner_total,
@@ -875,8 +906,7 @@ def run_all(config: dict[str, Any], output_h5: Path) -> dict[str, int]:
                     )
 
                     live_plot_path = (
-                        live_root
-                        / f"{run_id}_{dist['name'].replace(' ', '_')}_{method}_convergence.png"
+                        diagnostic_root / f"{run_id}_convergence.pdf"
                     )
                     live_energy: list[float] = []
                     live_grad: list[float] = []
@@ -906,7 +936,7 @@ def run_all(config: dict[str, Any], output_h5: Path) -> dict[str, int]:
                                 live_energy,
                                 live_grad,
                                 live_plot_path,
-                                title=run_name,
+                                title=run_diagnostic_title,
                             )
                             last_saved_at = iteration
 
@@ -917,8 +947,7 @@ def run_all(config: dict[str, Any], output_h5: Path) -> dict[str, int]:
                             distribution_cfg=dist,
                             common=common,
                             run_seed=base_seed + run_counter,
-                            checkpoint_root=output_h5.parent,
-                            run_namespace=output_h5.stem,
+                            checkpoint_root=benchmark_dir,
                             run_id=run_id,
                             progress_callback=on_progress,
                         )
@@ -928,7 +957,7 @@ def run_all(config: dict[str, Any], output_h5: Path) -> dict[str, int]:
                             list(np.asarray(run["energy_history"], dtype=np.float64)),
                             list(np.asarray(run["riemann_grad_history"], dtype=np.float64)),
                             live_plot_path,
-                            title=run_name,
+                            title=run_diagnostic_title,
                         )
                     except Exception as exc:
                         failed_count += 1
@@ -938,7 +967,7 @@ def run_all(config: dict[str, Any], output_h5: Path) -> dict[str, int]:
                                 live_energy,
                                 live_grad,
                                 live_plot_path,
-                                title=f"{run_name} (failed)",
+                                title=f"{run_diagnostic_title} (failed)",
                             )
                         if fail_fast:
                             raise
@@ -970,33 +999,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip runs and regenerate plots from existing .h5",
     )
-    parser.add_argument(
-        "--input-h5",
-        type=Path,
-        default=None,
-        help="Path to .h5 file used in --plot-only mode",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("results/benchmarks"),
-        help="Directory for .h5 and plots",
-    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    output_dir = args.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-    experiment_name = config.get("experiment_name", "benchmark")
+    output_root = Path(config["output_root"])
+    output_root.mkdir(parents=True, exist_ok=True)
 
     if args.plot_only:
-        h5_path = args.input_h5 if args.input_h5 else latest_h5(output_dir)
+        h5_path = latest_h5(output_root)
         if h5_path is None or not h5_path.exists():
             raise FileNotFoundError("No .h5 file found for --plot-only mode")
-        print(f"[plot-only] loading {h5_path}")
         loaded_config, loaded_runs = load_runs_from_h5(h5_path)
         missing_ckpts = [
             str((h5_path.parent / run["model_ckpt_relpath"]))
@@ -1009,30 +1024,19 @@ def main() -> None:
                 "Some checkpoint directories referenced by this .h5 are missing. "
                 f"First missing entries:\n{preview}"
             )
-        digest = hashlib.sha1(str(h5_path).encode("utf-8")).hexdigest()[:8]
-        prefix = f"{experiment_name}_{digest}"
-        save_convergence_plots(
-            loaded_runs, loaded_config["plotting"], output_dir, prefix
-        )
-        save_scatter_plots(
-            loaded_config, loaded_runs, h5_path.parent, output_dir, prefix
-        )
-        print("[done] plots regenerated")
+        plots_dir = h5_path.parent / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        save_convergence_plots(loaded_runs, loaded_config["plotting"], plots_dir)
+        save_scatter_plots(loaded_config, loaded_runs, h5_path.parent, plots_dir)
         return
 
-    output_h5 = choose_output_h5(output_dir, experiment_name)
-    stats = run_all(config, output_h5)
-    digest = hashlib.sha1(str(output_h5).encode("utf-8")).hexdigest()[:8]
-    prefix = f"{experiment_name}_{digest}"
+    benchmark_dir = create_benchmark_session_dir(output_root)
+    output_h5 = benchmark_dir / "results.h5"
+    plots_dir = benchmark_dir / "plots"
+    run_all(config, benchmark_dir)
     config_for_scatter, runs_for_scatter = load_runs_from_h5(output_h5)
-    save_convergence_plots(
-        runs_for_scatter, config_for_scatter["plotting"], output_dir, prefix
-    )
-    save_scatter_plots(
-        config_for_scatter, runs_for_scatter, output_h5.parent, output_dir, prefix
-    )
-    print(f"[done] successful runs: {stats['success']}, failed runs: {stats['failed']}")
-    print(f"[done] results saved to {output_h5}")
+    save_convergence_plots(runs_for_scatter, config_for_scatter["plotting"], plots_dir)
+    save_scatter_plots(config_for_scatter, runs_for_scatter, benchmark_dir, plots_dir)
 
 
 if __name__ == "__main__":
