@@ -259,6 +259,7 @@ def run_single(
     checkpoint_root: Path,
     run_id: str,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    diagnostic_sample_size: int | None = None,
 ) -> dict[str, Any]:
     model, model_cfg = build_model(common, run_seed)
     potential, potential_meta = build_problem(distribution_cfg, common)
@@ -294,6 +295,7 @@ def run_single(
             verbose=bool(method_params.get("verbose", False)),
             use_tqdm=bool(method_params.get("use_tqdm", False)),
             progress_callback=progress_callback,
+            diagnostic_sample_size=diagnostic_sample_size,
         )
         final_model = history["final_parametric_model"]
         energies = np.asarray(history["energy_history"], dtype=np.float64)
@@ -332,6 +334,7 @@ def run_single(
             ensure_descent=bool(method_params.get("ensure_descent", True)),
             verbose=bool(method_params.get("verbose", False)),
             progress_callback=progress_callback,
+            diagnostic_sample_size=diagnostic_sample_size,
         )
         final_model = nnx.merge(graphdef, final_params)
         energies = np.asarray(history["energies"], dtype=np.float64)
@@ -370,6 +373,7 @@ def run_single(
             save_param_trajectory=False,
             verbose=bool(method_params.get("verbose", False)),
             progress_callback=progress_callback,
+            diagnostic_sample_size=diagnostic_sample_size,
         )
         final_model = nnx.merge(graphdef, final_params)
         energies = np.asarray(history["energies"], dtype=np.float64)
@@ -585,6 +589,56 @@ def save_live_convergence_plot(
     plt.close(fig)
 
 
+def save_live_scatter_plot(
+    scatter_samples: np.ndarray,
+    distribution_cfg: dict[str, Any],
+    plotting_cfg: dict[str, Any],
+    out_path: Path,
+    title: str,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=tuple(plotting_cfg.get("scatter_figsize", [8, 8])))
+
+    x = scatter_samples[:, 0]
+    y = scatter_samples[:, 1]
+    ax.scatter(
+        x,
+        y,
+        s=float(plotting_cfg.get("scatter_size", 20)),
+        alpha=float(plotting_cfg.get("method_alpha", 0.55)),
+        color=plotting_cfg.get("colors", {}).get("diagnostic", "#444444"),
+    )
+
+    try:
+        plot_pot = build_plot_potential_2d(distribution_cfg)
+        if plot_pot is not None:
+            low = np.min(scatter_samples[:, :2], axis=0)
+            high = np.max(scatter_samples[:, :2], axis=0)
+            margin = 0.2 * np.maximum(high - low, 1e-3)
+            x_bds = jnp.array([low[0] - margin[0], high[0] + margin[0]])
+            y_bds = jnp.array([low[1] - margin[1], high[1] + margin[1]])
+            plot_pot.plot_function(
+                fig=fig,
+                ax=ax,
+                x_bds=x_bds,
+                y_bds=y_bds,
+                fill=False,
+                levels=20,
+                alpha=0.5,
+            )
+    except Exception:
+        pass
+
+    ax.set_title("Samples")
+    ax.set_xlabel("x[0]")
+    ax.set_ylabel("x[1]")
+    ax.grid(True)
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
 def save_convergence_plots(
     runs: list[dict[str, Any]],
     plotting_cfg: dict[str, Any],
@@ -637,8 +691,6 @@ def save_convergence_plots(
 
         axes[0].set_title(f"Energy history ({distribution})")
         axes[1].set_title(f"Riemannian gradient history ({distribution})")
-        axes[0].set_yscale("log")
-        axes[1].set_yscale("log")
         axes[0].set_xlabel("iteration")
         axes[1].set_xlabel("iteration")
         axes[0].set_ylabel("energy")
@@ -658,7 +710,7 @@ def save_convergence_plots(
         fig.tight_layout()
         fig.subplots_adjust(bottom=bottom)
         dist_slug = sanitize_component(distribution)
-        out = output_dir / f"{dist_slug}__all_methods__run_all__convergence.pdf"
+        out = output_dir / f"run_all__{dist_slug}__all_methods__convergence.pdf"
         fig.savefig(out)
         plt.close(fig)
 
@@ -826,7 +878,7 @@ def save_scatter_plots(
             fig.subplots_adjust(bottom=bottom)
             dist_slug = sanitize_component(distribution)
             method_slug = sanitize_component(method)
-            out = output_dir / f"{dist_slug}__{method_slug}__run_all__scatter.pdf"
+            out = output_dir / f"run_all__{dist_slug}__{method_slug}__scatter.pdf"
             fig.savefig(out)
             plt.close(fig)
 
@@ -845,6 +897,7 @@ def latest_h5(output_root: Path) -> Path | None:
 
 def run_all(config: dict[str, Any], benchmark_dir: Path) -> dict[str, int]:
     common = config["common_params"]
+    plotting_cfg = config.get("plotting", {})
     dist_cfgs = distribution_grid(config["distributions"])
     base_seed = int(common.get("seed", 0))
     output_h5 = benchmark_dir / "results.h5"
@@ -855,6 +908,7 @@ def run_all(config: dict[str, Any], benchmark_dir: Path) -> dict[str, int]:
     plots_root.mkdir(parents=True, exist_ok=True)
     diagnostic_root.mkdir(parents=True, exist_ok=True)
     live_plot_every = max(1, int(common.get("live_plot_every", 20)))
+    plot_n_samples = int(common["plot_n_samples"])
     varying_keys_lookup: dict[tuple[str, str], list[str]] = {}
     for dist in dist_cfgs:
         for method, m_cfg in config["methods"].items():
@@ -893,9 +947,7 @@ def run_all(config: dict[str, Any], benchmark_dir: Path) -> dict[str, int]:
                         params,
                         varying_keys_lookup[(dist["name"], method)],
                     )
-                    run_diagnostic_title = (
-                        f"{dist['name']} | {run_id}\n{run_method_label}"
-                    )
+                    run_title_base = f"{dist['name']} "
                     inner_total = int(params.get("max_iterations", common.get("max_iterations", 300)))
                     inner_bar = tqdm(
                         total=inner_total,
@@ -905,15 +957,15 @@ def run_all(config: dict[str, Any], benchmark_dir: Path) -> dict[str, int]:
                         unit="iter",
                     )
 
-                    live_plot_path = (
-                        diagnostic_root / f"{run_id}_convergence.pdf"
-                    )
+                    live_convergence_path = diagnostic_root / f"run_{run_id}__convergence.pdf"
+                    live_scatter_path = diagnostic_root / f"run_{run_id}__scatter.pdf"
                     live_energy: list[float] = []
                     live_grad: list[float] = []
-                    last_saved_at = 0
+                    latest_scatter_samples: np.ndarray | None = None
+                    warned_1d_scatter = False
 
                     def on_progress(info: dict[str, Any]) -> None:
-                        nonlocal last_saved_at
+                        nonlocal latest_scatter_samples, warned_1d_scatter
                         iteration = int(info.get("iteration", 0)) + 1
                         delta = iteration - inner_bar.n
                         if delta > 0:
@@ -931,14 +983,37 @@ def run_all(config: dict[str, Any], benchmark_dir: Path) -> dict[str, int]:
                         elif np.isfinite(energy):
                             inner_bar.set_postfix_str(f"E={energy:.3e}")
 
-                        if iteration % live_plot_every == 0 and iteration != last_saved_at:
+                        scatter_samples = info.get("scatter_samples", None)
+                        if scatter_samples is not None:
+                            latest_scatter_samples = np.asarray(scatter_samples)
+
+                        diag_title = (
+                            f"{run_title_base} | iter={iteration}"
+                            + "\n"
+                            + run_method_label
+                        )
+
+                        if iteration % live_plot_every == 0:
                             save_live_convergence_plot(
                                 live_energy,
                                 live_grad,
-                                live_plot_path,
-                                title=run_diagnostic_title,
+                                live_convergence_path,
+                                title=diag_title,
                             )
-                            last_saved_at = iteration
+                            if int(common["dimension"]) >= 2:
+                                if latest_scatter_samples is not None:
+                                    save_live_scatter_plot(
+                                        latest_scatter_samples,
+                                        dist,
+                                        plotting_cfg,
+                                        live_scatter_path,
+                                        title=diag_title,
+                                    )
+                            elif not warned_1d_scatter:
+                                tqdm.write(
+                                    f"[warn] skip diagnostic scatter for {run_id}: dimension is 1"
+                                )
+                                warned_1d_scatter = True
 
                     try:
                         run = run_single(
@@ -950,24 +1025,57 @@ def run_all(config: dict[str, Any], benchmark_dir: Path) -> dict[str, int]:
                             checkpoint_root=benchmark_dir,
                             run_id=run_id,
                             progress_callback=on_progress,
+                            diagnostic_sample_size=plot_n_samples,
                         )
                         append_run_to_h5(output_h5, run_id, run)
                         success_count += 1
+                        final_iter = max(1, inner_bar.n)
+                        final_title = (
+                            f"{run_title_base} | iter={final_iter}"
+                            + "\n"
+                            + run_method_label
+                        )
                         save_live_convergence_plot(
                             list(np.asarray(run["energy_history"], dtype=np.float64)),
                             list(np.asarray(run["riemann_grad_history"], dtype=np.float64)),
-                            live_plot_path,
-                            title=run_diagnostic_title,
+                            live_convergence_path,
+                            title=final_title,
                         )
+                        if int(common["dimension"]) >= 2 and latest_scatter_samples is not None:
+                            save_live_scatter_plot(
+                                latest_scatter_samples,
+                                dist,
+                                plotting_cfg,
+                                live_scatter_path,
+                                title=final_title,
+                            )
                     except Exception as exc:
                         failed_count += 1
                         tqdm.write(f"[error] run {run_id} failed: {exc}")
+                        failed_iter = max(1, inner_bar.n)
+                        failed_title = (
+                            f"{run_title_base} | iter={failed_iter}"
+                            + "\n"
+                            + run_method_label
+                            + " (failed)"
+                        )
                         if live_energy or live_grad:
                             save_live_convergence_plot(
                                 live_energy,
                                 live_grad,
-                                live_plot_path,
-                                title=f"{run_diagnostic_title} (failed)",
+                                live_convergence_path,
+                                title=failed_title,
+                            )
+                        if (
+                            int(common["dimension"]) >= 2
+                            and latest_scatter_samples is not None
+                        ):
+                            save_live_scatter_plot(
+                                latest_scatter_samples,
+                                dist,
+                                plotting_cfg,
+                                live_scatter_path,
+                                title=failed_title,
                             )
                         if fail_fast:
                             raise

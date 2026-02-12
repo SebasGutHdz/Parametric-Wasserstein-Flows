@@ -1,0 +1,57 @@
+{
+  "output_root": "results/st_short",
+  "common_params": {
+    "seed": 0,
+    "dimension": 50,
+    "n_hidden": 2,
+    "width_hidden": 32,
+    "parametric_map": "node",
+    "rhs_model": "mlp",
+    "activation_fn": "tanh",
+    "time_dependent": true,
+    "ode_solver": "euler",
+    "dt0": 0.2,
+    "ref_density": "gaussian",
+    "scale_factor": 1.0,
+    "stepsize": 0.005,
+    "N_samples": 300,
+    "eval_samples": 5,
+    "plot_n_samples": 100,
+    "max_iterations": 10,
+    "tolerance": 0.0001,
+    "linear_solver": "cg",
+    "live_plot_every": 5
+  },
+  "distributions": [
+    {
+      "name": "styblinski-tang"
+    }
+  ],
+  "methods": {
+    "gradient_flow": {
+    },
+    "anderson": {
+      "solver": ["cg"],
+      "memory_size": [8],
+      "relaxation": [1.0, 1.8],
+      "regularization": [1e-3, 1e-1],
+      "regularization_kind": ["l2", "adaptive"],
+      "ensure_descent": [true]
+    }
+  },
+  "plotting": {
+    "figsize": [17, 6],
+    "scatter_figsize": [8, 8],
+    "colors": {
+      "gradient_flow": "#1f77b4",
+      "anderson": "#d62728",
+      "memoryless_qn": "#2ca02c"
+    },
+    "linestyles": ["-", "--", ":", "-.", "-"],
+    "linewidths": [2.3, 1.9, 1.5, 1.2, 1.0],
+    "markers": ["o", "^", "s", "D", "x", "P", "*", "v"],
+    "scatter_size": 22,
+    "gf_alpha": 0.45,
+    "method_alpha": 0.55
+  }
+}

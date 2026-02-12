@@ -46,6 +46,7 @@ def anderson_method(
     ensure_descent: bool=False,
     verbose: bool = True,
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    diagnostic_sample_size: Optional[int] = None,
 ) -> Tuple[PyTree, Dict]:
     """
     Anderson-accelerated gradient flow method for Wasserstein gradient flow.
@@ -190,6 +191,11 @@ def anderson_method(
 
         # Print progress
         if progress_callback is not None:
+            scatter_samples = None
+            if diagnostic_sample_size is not None and diagnostic_sample_size > 0:
+                key, diag_key = jax.random.split(key)
+                z_diag = jax.random.normal(diag_key, (diagnostic_sample_size, problem_dim))
+                scatter_samples = parametric_model(z_diag, params=current_params)
             progress_callback(
                 {
                     "method": "anderson",
@@ -197,6 +203,7 @@ def anderson_method(
                     "max_iterations": n_iterations,
                     "energy": float(energy),
                     "riemann_grad_norm": float(residual_norm / step_size),
+                    "scatter_samples": scatter_samples,
                     "converged": False,
                 }
             )

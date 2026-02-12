@@ -47,6 +47,7 @@ def run_gradient_flow(
     verbose: bool = True,
     use_tqdm: bool = True,
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    diagnostic_sample_size: Optional[int] = None,
 ) -> dict:
     """
     Run complete gradient flow integration with any LinearPotential
@@ -132,6 +133,14 @@ def run_gradient_flow(
             )
 
         if progress_callback is not None:
+            scatter_samples = None
+            if diagnostic_sample_size is not None and diagnostic_sample_size > 0:
+                key, diag_key = jax.random.split(key)
+                z_diag = jax.random.normal(
+                    diag_key,
+                    (diagnostic_sample_size, current_parametric_model.problem_dimension),
+                )
+                scatter_samples = current_parametric_model(z_diag)
             progress_callback(
                 {
                     "method": "gradient_flow",
@@ -139,6 +148,7 @@ def run_gradient_flow(
                     "max_iterations": max_iterations,
                     "energy": float(step_info["energy"]),
                     "riemann_grad_norm": float(step_info["riemann_gradient_norm"]),
+                    "scatter_samples": scatter_samples,
                     "converged": False,
                 }
             )
