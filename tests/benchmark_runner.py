@@ -3,9 +3,12 @@ import argparse
 import gc
 import itertools
 import json
+import multiprocessing as mp
 import os
+import queue
 import re
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Callable
 
@@ -69,6 +72,32 @@ def load_config(config_path: Path) -> dict[str, Any]:
             raise ValueError(f"Unknown method in config: {raw_name}")
         normalized_methods[canonical] = method_cfg or {}
     config["methods"] = normalized_methods
+
+    parallel_cfg = dict(config.get("parallel", {}))
+    max_workers = int(parallel_cfg.get("max_workers", 1))
+    if max_workers < 1:
+        raise ValueError("parallel.max_workers must be >= 1")
+
+    gpu_ids_raw = parallel_cfg.get("gpu_ids", [])
+    if not isinstance(gpu_ids_raw, list):
+        raise ValueError("parallel.gpu_ids must be a list of non-negative integers")
+    gpu_ids = [int(g) for g in gpu_ids_raw]
+    if any(g < 0 for g in gpu_ids):
+        raise ValueError("parallel.gpu_ids must contain only non-negative integers")
+
+    disable_preallocate = bool(parallel_cfg.get("disable_preallocate", True))
+    mem_fraction = parallel_cfg.get("mem_fraction", None)
+    if mem_fraction is not None:
+        mem_fraction = float(mem_fraction)
+        if not (0.0 < mem_fraction <= 1.0):
+            raise ValueError("parallel.mem_fraction must be in (0, 1]")
+
+    config["parallel"] = {
+        "max_workers": max_workers,
+        "gpu_ids": gpu_ids,
+        "disable_preallocate": disable_preallocate,
+        "mem_fraction": mem_fraction,
+    }
     return config
 
 
@@ -895,11 +924,301 @@ def latest_h5(output_root: Path) -> Path | None:
     return files[-1] if files else None
 
 
+def _get_live_plot_every(common: dict[str, Any]) -> int | None:
+    if "live_plot_every" not in common:
+        return None
+    return max(1, int(common["live_plot_every"]))
+
+
+def _prepare_planned_runs(config: dict[str, Any]) -> list[dict[str, Any]]:
+    common = config["common_params"]
+    dist_cfgs = distribution_grid(config["distributions"])
+    base_seed = int(common.get("seed", 0))
+
+    varying_keys_lookup: dict[tuple[str, str], list[str]] = {}
+    for dist in dist_cfgs:
+        for method, m_cfg in config["methods"].items():
+            candidate_runs: list[dict[str, Any]] = []
+            for params in method_grid(m_cfg):
+                p = dict(params)
+                p.setdefault("stepsize", common["stepsize"])
+                p.setdefault("max_iterations", common.get("max_iterations", 300))
+                p.setdefault("tolerance", common.get("tolerance", 1e-4))
+                candidate_runs.append({"method_params": p})
+            varying_keys_lookup[(dist["name"], method)] = get_varying_keys(candidate_runs)
+
+    planned_runs: list[dict[str, Any]] = []
+    run_counter = 0
+    for dist in dist_cfgs:
+        for method, m_cfg in config["methods"].items():
+            for params in method_grid(m_cfg):
+                p = dict(params)
+                p.setdefault("stepsize", common["stepsize"])
+                p.setdefault("max_iterations", common.get("max_iterations", 300))
+                p.setdefault("tolerance", common.get("tolerance", 1e-4))
+                dist_slug = sanitize_component(dist["name"])
+                method_slug = sanitize_component(method)
+                run_id = f"{dist_slug}__{method_slug}__run_{run_counter:04d}"
+                run_name = f"{dist['name']} | {method} | {run_id}"
+                run_method_label = build_method_label_latex(
+                    method,
+                    p,
+                    varying_keys_lookup[(dist["name"], method)],
+                )
+                planned_runs.append(
+                    {
+                        "run_index": run_counter,
+                        "run_id": run_id,
+                        "run_name": run_name,
+                        "run_title_base": f"{dist['name']} ",
+                        "run_method_label": run_method_label,
+                        "inner_total": int(
+                            p.get("max_iterations", common.get("max_iterations", 300))
+                        ),
+                        "method": method,
+                        "params": p,
+                        "distribution": dist,
+                        "run_seed": base_seed + run_counter,
+                    }
+                )
+                run_counter += 1
+    return planned_runs
+
+
+def _execute_planned_run(
+    planned_run: dict[str, Any],
+    common: dict[str, Any],
+    plotting_cfg: dict[str, Any],
+    benchmark_dir: Path,
+    live_plot_every: int | None,
+    plot_n_samples: int,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    progress_sink: Callable[[dict[str, Any]], None] | None = None,
+    print_warnings: bool = True,
+) -> tuple[dict[str, Any], int]:
+    run_id = str(planned_run["run_id"])
+    method = str(planned_run["method"])
+    params = dict(planned_run["params"])
+    dist = dict(planned_run["distribution"])
+
+    diagnostic_root = benchmark_dir / "diagnostic_plots"
+    live_convergence_path = diagnostic_root / f"run_{run_id}__convergence.pdf"
+    live_scatter_path = diagnostic_root / f"run_{run_id}__scatter.pdf"
+
+    live_energy: list[float] = []
+    live_grad: list[float] = []
+    latest_scatter_samples: np.ndarray | None = None
+    warned_1d_scatter = False
+
+    def on_progress(info: dict[str, Any]) -> None:
+        nonlocal latest_scatter_samples, warned_1d_scatter
+
+        iteration = int(info.get("iteration", 0)) + 1
+        energy = float(info.get("energy", np.nan))
+        grad = float(info.get("riemann_grad_norm", np.nan))
+
+        if np.isfinite(energy):
+            live_energy.append(energy)
+        if np.isfinite(grad):
+            live_grad.append(grad)
+
+        scatter_samples = info.get("scatter_samples", None)
+        if scatter_samples is not None:
+            latest_scatter_samples = np.asarray(scatter_samples)
+
+        if progress_callback is not None:
+            progress_callback(info)
+
+        if progress_sink is not None:
+            progress_sink(
+                {
+                    "iteration": iteration,
+                    "energy": energy,
+                    "grad": grad,
+                }
+            )
+
+        if live_plot_every is None or iteration % live_plot_every != 0:
+            return
+
+        diag_title = (
+            f"{planned_run['run_title_base']} | iter={iteration}"
+            + "\n"
+            + planned_run["run_method_label"]
+        )
+        save_live_convergence_plot(
+            live_energy,
+            live_grad,
+            live_convergence_path,
+            title=diag_title,
+        )
+        if int(common["dimension"]) >= 2:
+            if latest_scatter_samples is not None:
+                save_live_scatter_plot(
+                    latest_scatter_samples,
+                    dist,
+                    plotting_cfg,
+                    live_scatter_path,
+                    title=diag_title,
+                )
+        elif not warned_1d_scatter:
+            if print_warnings:
+                tqdm.write(
+                    f"[warn] skip diagnostic scatter for {run_id}: dimension is 1"
+                )
+            warned_1d_scatter = True
+
+    run = run_single(
+        method=method,
+        method_params=params,
+        distribution_cfg=dist,
+        common=common,
+        run_seed=int(planned_run["run_seed"]),
+        checkpoint_root=benchmark_dir,
+        run_id=run_id,
+        progress_callback=on_progress,
+        diagnostic_sample_size=plot_n_samples,
+    )
+
+    final_iter = max(1, len(run["energy_history"]))
+    if live_plot_every is not None:
+        final_title = (
+            f"{planned_run['run_title_base']} | iter={final_iter}"
+            + "\n"
+            + planned_run["run_method_label"]
+        )
+        save_live_convergence_plot(
+            list(np.asarray(run["energy_history"], dtype=np.float64)),
+            list(np.asarray(run["riemann_grad_history"], dtype=np.float64)),
+            live_convergence_path,
+            title=final_title,
+        )
+        if int(common["dimension"]) >= 2 and latest_scatter_samples is not None:
+            save_live_scatter_plot(
+                latest_scatter_samples,
+                dist,
+                plotting_cfg,
+                live_scatter_path,
+                title=final_title,
+            )
+
+    return run, final_iter
+
+
+def _parallel_worker_loop(
+    worker_id: int,
+    gpu_id: int,
+    task_queue: mp.Queue,
+    result_queue: mp.Queue,
+    benchmark_dir: str,
+    common: dict[str, Any],
+    plotting_cfg: dict[str, Any],
+    live_plot_every: int | None,
+    plot_n_samples: int,
+) -> None:
+    def _probe_device() -> tuple[bool, str]:
+        try:
+            probe = jnp.ones((1,), dtype=jnp.float32)
+            device_obj = None
+            if hasattr(probe, "device"):
+                device_attr = probe.device
+                if callable(device_attr):
+                    device_obj = device_attr()
+                else:
+                    device_obj = device_attr
+            if device_obj is None and hasattr(probe, "devices"):
+                devices = probe.devices()
+                if devices:
+                    device_obj = next(iter(devices))
+            if device_obj is None:
+                return False, "unknown"
+
+            platform_name = str(getattr(device_obj, "platform", "")).lower()
+            if not platform_name:
+                match = re.search(r"(cpu|gpu|cuda)", str(device_obj).lower())
+                if match is not None:
+                    platform_name = "gpu" if match.group(1) in {"gpu", "cuda"} else "cpu"
+
+            is_gpu = platform_name in {"gpu", "cuda"}
+            return is_gpu, str(device_obj)
+        except Exception:
+            return False, "probe-error"
+
+    benchmark_path = Path(benchmark_dir)
+    while True:
+        task = task_queue.get()
+        if task is None:
+            break
+
+        planned_run = task["planned_run"]
+        run_id = str(planned_run["run_id"])
+        probe_is_gpu, probe_device_str = _probe_device()
+        result_queue.put(
+            {
+                "event": "run_started",
+                "worker_id": worker_id,
+                "gpu_id": gpu_id,
+                "probe_is_gpu": probe_is_gpu,
+                "probe_device": probe_device_str,
+                "run_id": run_id,
+                "run_name": planned_run["run_name"],
+                "inner_total": int(planned_run["inner_total"]),
+            }
+        )
+
+        def sink(update: dict[str, Any]) -> None:
+            result_queue.put(
+                {
+                    "event": "progress",
+                    "worker_id": worker_id,
+                    "gpu_id": gpu_id,
+                    "run_id": run_id,
+                    "iteration": int(update["iteration"]),
+                    "energy": float(update["energy"]),
+                    "grad": float(update["grad"]),
+                }
+            )
+
+        try:
+            run, _ = _execute_planned_run(
+                planned_run=planned_run,
+                common=common,
+                plotting_cfg=plotting_cfg,
+                benchmark_dir=benchmark_path,
+                live_plot_every=live_plot_every,
+                plot_n_samples=plot_n_samples,
+                progress_sink=sink,
+                print_warnings=False,
+            )
+            result_queue.put(
+                {
+                    "event": "run_complete",
+                    "worker_id": worker_id,
+                    "gpu_id": gpu_id,
+                    "probe_is_gpu": probe_is_gpu,
+                    "probe_device": probe_device_str,
+                    "run_id": run_id,
+                    "run": run,
+                }
+            )
+        except Exception as exc:
+            result_queue.put(
+                {
+                    "event": "run_error",
+                    "worker_id": worker_id,
+                    "gpu_id": gpu_id,
+                    "probe_is_gpu": probe_is_gpu,
+                    "probe_device": probe_device_str,
+                    "run_id": run_id,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+
+
 def run_all(config: dict[str, Any], benchmark_dir: Path) -> dict[str, int]:
     common = config["common_params"]
     plotting_cfg = config.get("plotting", {})
-    dist_cfgs = distribution_grid(config["distributions"])
-    base_seed = int(common.get("seed", 0))
     output_h5 = benchmark_dir / "results.h5"
     ckpt_root = benchmark_dir / "model_checkpoints"
     plots_root = benchmark_dir / "plots"
@@ -907,191 +1226,304 @@ def run_all(config: dict[str, Any], benchmark_dir: Path) -> dict[str, int]:
     ckpt_root.mkdir(parents=True, exist_ok=True)
     plots_root.mkdir(parents=True, exist_ok=True)
     diagnostic_root.mkdir(parents=True, exist_ok=True)
-    live_plot_every = max(1, int(common.get("live_plot_every", 20)))
+    live_plot_every = _get_live_plot_every(common)
     plot_n_samples = int(common["plot_n_samples"])
-    varying_keys_lookup: dict[tuple[str, str], list[str]] = {}
-    for dist in dist_cfgs:
-        for method, m_cfg in config["methods"].items():
-            planned_runs: list[dict[str, Any]] = []
-            for params in method_grid(m_cfg):
-                p = dict(params)
-                p.setdefault("stepsize", common["stepsize"])
-                p.setdefault("max_iterations", common.get("max_iterations", 300))
-                p.setdefault("tolerance", common.get("tolerance", 1e-4))
-                planned_runs.append({"method_params": p})
-            varying_keys_lookup[(dist["name"], method)] = get_varying_keys(planned_runs)
-    total_runs = len(dist_cfgs) * sum(
-        len(method_grid(m_cfg)) for m_cfg in config["methods"].values()
-    )
+    planned_runs = _prepare_planned_runs(config)
+    total_runs = len(planned_runs)
     initialize_h5(output_h5, config)
 
-    run_counter = 0
     success_count = 0
     failed_count = 0
     fail_fast = bool(config.get("fail_fast", False))
+    max_workers = int(config.get("parallel", {}).get("max_workers", 1))
     outer_bar = tqdm(total=total_runs, desc="Benchmark", position=0, leave=True, unit="run")
+
+    if max_workers <= 1:
+        try:
+            for planned_run in planned_runs:
+                inner_bar = tqdm(
+                    total=int(planned_run["inner_total"]),
+                    desc=str(planned_run["run_name"]),
+                    position=1,
+                    leave=False,
+                    unit="iter",
+                )
+
+                def inner_progress(info: dict[str, Any]) -> None:
+                    iteration = int(info.get("iteration", 0)) + 1
+                    delta = iteration - inner_bar.n
+                    if delta > 0:
+                        inner_bar.update(delta)
+                    energy = float(info.get("energy", np.nan))
+                    grad = float(info.get("riemann_grad_norm", np.nan))
+                    if np.isfinite(energy) and np.isfinite(grad):
+                        inner_bar.set_postfix_str(f"E={energy:.3e} G={grad:.3e}")
+                    elif np.isfinite(energy):
+                        inner_bar.set_postfix_str(f"E={energy:.3e}")
+
+                try:
+                    run, _ = _execute_planned_run(
+                        planned_run=planned_run,
+                        common=common,
+                        plotting_cfg=plotting_cfg,
+                        benchmark_dir=benchmark_dir,
+                        live_plot_every=live_plot_every,
+                        plot_n_samples=plot_n_samples,
+                        progress_callback=inner_progress,
+                    )
+                    append_run_to_h5(output_h5, str(planned_run["run_id"]), run)
+                    success_count += 1
+                except Exception as exc:
+                    failed_count += 1
+                    tqdm.write(f"[error] run {planned_run['run_id']} failed: {exc}")
+                    if fail_fast:
+                        raise
+                finally:
+                    inner_bar.close()
+                    outer_bar.update(1)
+                    outer_bar.set_postfix_str(f"ok={success_count} fail={failed_count}")
+                    jax.clear_caches()
+                    gc.collect()
+            return {"success": success_count, "failed": failed_count}
+        finally:
+            outer_bar.close()
+
+    parallel_cfg = config.get("parallel", {})
+    gpu_ids = list(parallel_cfg.get("gpu_ids", []))
+    if not gpu_ids:
+        gpu_ids = [0]
+
+    ctx = mp.get_context("spawn")
+    result_queue: mp.Queue = ctx.Queue()
+    task_queues: dict[int, mp.Queue] = {}
+    workers: dict[int, Any] = {}
+    worker_gpu: dict[int, int] = {}
+    worker_label: dict[int, str] = {}
+    worker_cpu_warned: dict[int, bool] = {}
+    worker_bars: dict[int, Any] = {}
+    worker_active_run: dict[int, str | None] = {}
+
+    disable_preallocate = bool(parallel_cfg.get("disable_preallocate", True))
+    mem_fraction = parallel_cfg.get("mem_fraction", None)
+
+    launch_workers = max_workers
+    for worker_id in range(launch_workers):
+        gpu_id = int(gpu_ids[worker_id % len(gpu_ids)])
+        worker_gpu[worker_id] = gpu_id
+        worker_label[worker_id] = f"GPU{gpu_id}"
+        worker_cpu_warned[worker_id] = False
+        worker_active_run[worker_id] = None
+
+        env_prev = {
+            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "XLA_PYTHON_CLIENT_PREALLOCATE": os.environ.get(
+                "XLA_PYTHON_CLIENT_PREALLOCATE"
+            ),
+            "XLA_PYTHON_CLIENT_MEM_FRACTION": os.environ.get(
+                "XLA_PYTHON_CLIENT_MEM_FRACTION"
+            ),
+        }
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        if disable_preallocate:
+            os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+        elif env_prev["XLA_PYTHON_CLIENT_PREALLOCATE"] is None:
+            os.environ.pop("XLA_PYTHON_CLIENT_PREALLOCATE", None)
+        if mem_fraction is not None:
+            os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(mem_fraction)
+        elif env_prev["XLA_PYTHON_CLIENT_MEM_FRACTION"] is None:
+            os.environ.pop("XLA_PYTHON_CLIENT_MEM_FRACTION", None)
+
+        task_queue: mp.Queue = ctx.Queue()
+        proc = ctx.Process(
+            target=_parallel_worker_loop,
+            args=(
+                worker_id,
+                gpu_id,
+                task_queue,
+                result_queue,
+                str(benchmark_dir),
+                common,
+                plotting_cfg,
+                live_plot_every,
+                plot_n_samples,
+            ),
+            daemon=True,
+        )
+        proc.start()
+
+        for key, val in env_prev.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+
+        task_queues[worker_id] = task_queue
+        workers[worker_id] = proc
+        worker_bars[worker_id] = tqdm(
+            total=1,
+            desc=f"W{worker_id}|{worker_label[worker_id]}|idle",
+            position=worker_id + 1,
+            leave=False,
+            unit="iter",
+        )
+
+    pending_idx = 0
+    completed_runs = 0
+    abort_due_to_fail_fast = False
+    fail_fast_error: str | None = None
+
+    def dispatch_to_worker(wid: int) -> bool:
+        nonlocal pending_idx
+        if pending_idx >= total_runs:
+            worker_active_run[wid] = None
+            return False
+        planned_run = planned_runs[pending_idx]
+        pending_idx += 1
+        worker_active_run[wid] = str(planned_run["run_id"])
+        task_queues[wid].put({"planned_run": planned_run})
+        return True
+
     try:
-        for dist in dist_cfgs:
-            for method, m_cfg in config["methods"].items():
-                for params in method_grid(m_cfg):
-                    params = dict(params)
-                    params.setdefault("stepsize", common["stepsize"])
-                    params.setdefault("max_iterations", common.get("max_iterations", 300))
-                    params.setdefault("tolerance", common.get("tolerance", 1e-4))
-                    dist_slug = sanitize_component(dist["name"])
-                    method_slug = sanitize_component(method)
-                    run_id = f"{dist_slug}__{method_slug}__run_{run_counter:04d}"
-                    run_name = f"{dist['name']} | {method} | {run_id}"
-                    run_method_label = build_method_label_latex(
-                        method,
-                        params,
-                        varying_keys_lookup[(dist["name"], method)],
+        for worker_id in range(launch_workers):
+            dispatch_to_worker(worker_id)
+
+        while completed_runs < total_runs:
+            try:
+                msg = result_queue.get(timeout=0.5)
+            except queue.Empty:
+                dead_workers = [
+                    wid
+                    for wid, proc in workers.items()
+                    if not proc.is_alive() and worker_active_run[wid] is not None
+                ]
+                if dead_workers:
+                    wid = dead_workers[0]
+                    failed_count += 1
+                    completed_runs += 1
+                    run_id = worker_active_run[wid]
+                    worker_active_run[wid] = None
+                    tqdm.write(
+                        f"[error] worker {wid} on GPU {worker_gpu[wid]} exited unexpectedly"
+                        + (f" while running {run_id}" if run_id else "")
                     )
-                    run_title_base = f"{dist['name']} "
-                    inner_total = int(params.get("max_iterations", common.get("max_iterations", 300)))
-                    inner_bar = tqdm(
-                        total=inner_total,
-                        desc=run_name,
-                        position=1,
-                        leave=False,
-                        unit="iter",
+                    worker_bars[wid].set_description_str(
+                        f"W{wid}|{worker_label[wid]}|dead"
+                    )
+                    worker_bars[wid].set_postfix_str("failed")
+                    outer_bar.update(1)
+                    outer_bar.set_postfix_str(f"ok={success_count} fail={failed_count}")
+                    if fail_fast:
+                        abort_due_to_fail_fast = True
+                        fail_fast_error = f"worker {wid} crashed"
+                        break
+                if (
+                    all(not proc.is_alive() for proc in workers.values())
+                    and completed_runs < total_runs
+                ):
+                    abort_due_to_fail_fast = True
+                    fail_fast_error = "all workers exited before completing all runs"
+                    break
+                continue
+
+            event = str(msg.get("event", ""))
+            worker_id = int(msg.get("worker_id", -1))
+            if worker_id not in worker_bars:
+                continue
+            bar = worker_bars[worker_id]
+
+            if event == "run_started":
+                probe_is_gpu = bool(msg.get("probe_is_gpu", False))
+                probe_device = str(msg.get("probe_device", "unknown"))
+                assigned_gpu = worker_gpu[worker_id]
+                worker_label[worker_id] = (
+                    f"GPU{assigned_gpu}" if probe_is_gpu else "CPU"
+                )
+                if not probe_is_gpu and not worker_cpu_warned[worker_id]:
+                    tqdm.write(
+                        f"[warn] worker {worker_id} assigned GPU {assigned_gpu} "
+                        f"is running on CPU (probe: {probe_device})"
+                    )
+                    worker_cpu_warned[worker_id] = True
+                inner_total = int(msg.get("inner_total", 1))
+                run_id = str(msg.get("run_id", "unknown"))
+                run_name = str(msg.get("run_name", run_id))
+                bar.reset(total=max(1, inner_total))
+                bar.n = 0
+                bar.set_description_str(
+                    f"W{worker_id}|{worker_label[worker_id]}|{run_name}"
+                )
+                bar.set_postfix_str("")
+                bar.refresh()
+            elif event == "progress":
+                iteration = int(msg.get("iteration", 0))
+                delta = iteration - bar.n
+                if delta > 0:
+                    bar.update(delta)
+                energy = float(msg.get("energy", np.nan))
+                grad = float(msg.get("grad", np.nan))
+                if np.isfinite(energy) and np.isfinite(grad):
+                    bar.set_postfix_str(f"E={energy:.3e} G={grad:.3e}")
+                elif np.isfinite(energy):
+                    bar.set_postfix_str(f"E={energy:.3e}")
+            elif event == "run_complete":
+                run_id = str(msg["run_id"])
+                run = msg["run"]
+                append_run_to_h5(output_h5, run_id, run)
+                success_count += 1
+                completed_runs += 1
+                worker_active_run[worker_id] = None
+                outer_bar.update(1)
+                outer_bar.set_postfix_str(f"ok={success_count} fail={failed_count}")
+                bar.set_postfix_str("done")
+                gc.collect()
+                if not dispatch_to_worker(worker_id):
+                    bar.set_description_str(
+                        f"W{worker_id}|{worker_label[worker_id]}|idle"
+                    )
+            elif event == "run_error":
+                run_id = str(msg.get("run_id", "unknown"))
+                err = str(msg.get("error", "unknown error"))
+                tb = str(msg.get("traceback", ""))
+                failed_count += 1
+                completed_runs += 1
+                worker_active_run[worker_id] = None
+                tqdm.write(
+                    f"[error] run {run_id} failed on worker {worker_id}"
+                    f" ({worker_label[worker_id]}): {err}"
+                )
+                if tb:
+                    tqdm.write(tb)
+                outer_bar.update(1)
+                outer_bar.set_postfix_str(f"ok={success_count} fail={failed_count}")
+                bar.set_postfix_str("failed")
+                if fail_fast:
+                    abort_due_to_fail_fast = True
+                    fail_fast_error = f"run {run_id} failed: {err}"
+                    break
+                if not dispatch_to_worker(worker_id):
+                    bar.set_description_str(
+                        f"W{worker_id}|{worker_label[worker_id]}|idle"
                     )
 
-                    live_convergence_path = diagnostic_root / f"run_{run_id}__convergence.pdf"
-                    live_scatter_path = diagnostic_root / f"run_{run_id}__scatter.pdf"
-                    live_energy: list[float] = []
-                    live_grad: list[float] = []
-                    latest_scatter_samples: np.ndarray | None = None
-                    warned_1d_scatter = False
+        for worker_id, tq in task_queues.items():
+            try:
+                tq.put(None)
+            except Exception:
+                pass
 
-                    def on_progress(info: dict[str, Any]) -> None:
-                        nonlocal latest_scatter_samples, warned_1d_scatter
-                        iteration = int(info.get("iteration", 0)) + 1
-                        delta = iteration - inner_bar.n
-                        if delta > 0:
-                            inner_bar.update(delta)
+        for worker_id, proc in workers.items():
+            proc.join(timeout=5.0)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=2.0)
 
-                        energy = float(info.get("energy", np.nan))
-                        grad = float(info.get("riemann_grad_norm", np.nan))
-                        if np.isfinite(energy):
-                            live_energy.append(energy)
-                        if np.isfinite(grad):
-                            live_grad.append(grad)
-
-                        if np.isfinite(energy) and np.isfinite(grad):
-                            inner_bar.set_postfix_str(f"E={energy:.3e} G={grad:.3e}")
-                        elif np.isfinite(energy):
-                            inner_bar.set_postfix_str(f"E={energy:.3e}")
-
-                        scatter_samples = info.get("scatter_samples", None)
-                        if scatter_samples is not None:
-                            latest_scatter_samples = np.asarray(scatter_samples)
-
-                        diag_title = (
-                            f"{run_title_base} | iter={iteration}"
-                            + "\n"
-                            + run_method_label
-                        )
-
-                        if iteration % live_plot_every == 0:
-                            save_live_convergence_plot(
-                                live_energy,
-                                live_grad,
-                                live_convergence_path,
-                                title=diag_title,
-                            )
-                            if int(common["dimension"]) >= 2:
-                                if latest_scatter_samples is not None:
-                                    save_live_scatter_plot(
-                                        latest_scatter_samples,
-                                        dist,
-                                        plotting_cfg,
-                                        live_scatter_path,
-                                        title=diag_title,
-                                    )
-                            elif not warned_1d_scatter:
-                                tqdm.write(
-                                    f"[warn] skip diagnostic scatter for {run_id}: dimension is 1"
-                                )
-                                warned_1d_scatter = True
-
-                    try:
-                        run = run_single(
-                            method=method,
-                            method_params=params,
-                            distribution_cfg=dist,
-                            common=common,
-                            run_seed=base_seed + run_counter,
-                            checkpoint_root=benchmark_dir,
-                            run_id=run_id,
-                            progress_callback=on_progress,
-                            diagnostic_sample_size=plot_n_samples,
-                        )
-                        append_run_to_h5(output_h5, run_id, run)
-                        success_count += 1
-                        final_iter = max(1, inner_bar.n)
-                        final_title = (
-                            f"{run_title_base} | iter={final_iter}"
-                            + "\n"
-                            + run_method_label
-                        )
-                        save_live_convergence_plot(
-                            list(np.asarray(run["energy_history"], dtype=np.float64)),
-                            list(np.asarray(run["riemann_grad_history"], dtype=np.float64)),
-                            live_convergence_path,
-                            title=final_title,
-                        )
-                        if int(common["dimension"]) >= 2 and latest_scatter_samples is not None:
-                            save_live_scatter_plot(
-                                latest_scatter_samples,
-                                dist,
-                                plotting_cfg,
-                                live_scatter_path,
-                                title=final_title,
-                            )
-                    except Exception as exc:
-                        failed_count += 1
-                        tqdm.write(f"[error] run {run_id} failed: {exc}")
-                        failed_iter = max(1, inner_bar.n)
-                        failed_title = (
-                            f"{run_title_base} | iter={failed_iter}"
-                            + "\n"
-                            + run_method_label
-                            + " (failed)"
-                        )
-                        if live_energy or live_grad:
-                            save_live_convergence_plot(
-                                live_energy,
-                                live_grad,
-                                live_convergence_path,
-                                title=failed_title,
-                            )
-                        if (
-                            int(common["dimension"]) >= 2
-                            and latest_scatter_samples is not None
-                        ):
-                            save_live_scatter_plot(
-                                latest_scatter_samples,
-                                dist,
-                                plotting_cfg,
-                                live_scatter_path,
-                                title=failed_title,
-                            )
-                        if fail_fast:
-                            raise
-                    finally:
-                        inner_bar.close()
-                        run_counter += 1
-                        outer_bar.update(1)
-                        outer_bar.set_postfix_str(
-                            f"ok={success_count} fail={failed_count}"
-                        )
-                        jax.clear_caches()
-                        gc.collect()
+        if abort_due_to_fail_fast:
+            raise RuntimeError(fail_fast_error or "fail_fast triggered")
+        return {"success": success_count, "failed": failed_count}
     finally:
         outer_bar.close()
-
-    return {"success": success_count, "failed": failed_count}
+        for bar in worker_bars.values():
+            bar.close()
 
 
 def parse_args() -> argparse.Namespace:
