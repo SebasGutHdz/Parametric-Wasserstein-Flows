@@ -73,6 +73,27 @@ def load_config(config_path: Path) -> dict[str, Any]:
         normalized_methods[canonical] = method_cfg or {}
     config["methods"] = normalized_methods
 
+    plotting_cfg = config["plotting"]
+    if not isinstance(plotting_cfg, dict):
+        raise ValueError("config['plotting'] must be a dict")
+    if "style_channels" in plotting_cfg and not isinstance(
+        plotting_cfg["style_channels"], list
+    ):
+        raise ValueError("plotting.style_channels must be a list")
+    if "style_values" in plotting_cfg and not isinstance(
+        plotting_cfg["style_values"], dict
+    ):
+        raise ValueError("plotting.style_values must be a dict")
+
+    legacy_plotting_keys = {"colors", "linestyles", "linewidths", "markers"}
+    present_legacy = sorted(k for k in legacy_plotting_keys if k in plotting_cfg)
+    if present_legacy:
+        raise ValueError(
+            "Legacy plotting keys are no longer supported: "
+            + ", ".join(present_legacy)
+            + ". Use plotting.method_colormaps/style_channels/style_values."
+        )
+
     parallel_cfg = dict(config.get("parallel", {}))
     max_workers = int(parallel_cfg.get("max_workers", 1))
     if max_workers < 1:
@@ -510,16 +531,190 @@ VALUE_LABELS = {
 }
 
 
-def get_varying_keys(method_runs: list[dict[str, Any]]) -> list[str]:
+def get_varying_keys_in_order(
+    method_runs: list[dict[str, Any]],
+    key_order: list[str] | None = None,
+) -> list[str]:
     if not method_runs:
         return []
-    keys = sorted({k for run in method_runs for k in run["method_params"].keys()})
-    varying = []
-    for key in keys:
+
+    ordered_keys: list[str] = []
+    seen: set[str] = set()
+    if key_order is not None:
+        for key in key_order:
+            if key not in seen:
+                ordered_keys.append(key)
+                seen.add(key)
+    for run in method_runs:
+        for key in run["method_params"].keys():
+            if key not in seen:
+                ordered_keys.append(key)
+                seen.add(key)
+
+    varying: list[str] = []
+    for key in ordered_keys:
         values = [run["method_params"].get(key, None) for run in method_runs]
         if len(set(values)) > 1:
             varying.append(key)
     return varying
+
+
+def _append_unique(values: list[Any], value: Any) -> None:
+    if value not in values:
+        values.append(value)
+
+
+def _value_order_for_param(
+    method_cfg: dict[str, Any],
+    key: str,
+    method_runs: list[dict[str, Any]],
+) -> list[Any]:
+    ordered_values: list[Any] = []
+    if key in method_cfg:
+        cfg_values = method_cfg[key]
+        cfg_list = cfg_values if isinstance(cfg_values, list) else [cfg_values]
+        for value in cfg_list:
+            _append_unique(ordered_values, value)
+    for run in method_runs:
+        if key in run["method_params"]:
+            _append_unique(ordered_values, run["method_params"][key])
+    return ordered_values
+
+
+def _method_param_order(
+    method_cfg: dict[str, Any], method_runs: list[dict[str, Any]]
+) -> list[str]:
+    order: list[str] = []
+    seen: set[str] = set()
+    for key in method_cfg.keys():
+        if key not in seen:
+            order.append(key)
+            seen.add(key)
+    for run in method_runs:
+        for key in run["method_params"].keys():
+            if key not in seen:
+                order.append(key)
+                seen.add(key)
+    return order
+
+
+def _sample_colormap(method: str, cmap_name: str, count: int) -> list[Any]:
+    if count <= 0:
+        return []
+    try:
+        cmap = plt.get_cmap(cmap_name)
+    except ValueError:
+        tqdm.write(
+            f"[warn] unknown colormap '{cmap_name}' for {method}; using 'viridis'"
+        )
+        cmap = plt.get_cmap("viridis")
+
+    if count == 1:
+        return [cmap(0.6)]
+    return [cmap(t) for t in np.linspace(0.15, 0.9, count)]
+
+
+DEFAULT_STYLE_CHANNELS = ["color", "linestyle", "linewidth", "marker"]
+
+DEFAULT_STYLE_VALUES = {
+    "linestyle": ["-", "--", ":", "-."],
+    "linewidth": [2.2, 1.8, 1.4, 1.1],
+    "marker": ["o", "^", "s", "D", "x", "P", "*", "v"],
+    "alpha": [0.9, 0.75, 0.6, 0.45],
+}
+
+
+def _values_for_style_channel(plotting_cfg: dict[str, Any], channel: str) -> list[Any]:
+    style_values = plotting_cfg.get("style_values", {})
+    if channel in style_values:
+        values = style_values[channel]
+        if not isinstance(values, list):
+            values = [values]
+        if not values:
+            raise ValueError(f"plotting.style_values['{channel}'] must not be empty")
+        return values
+
+    if channel in DEFAULT_STYLE_VALUES:
+        return DEFAULT_STYLE_VALUES[channel]
+
+    raise ValueError(
+        f"No default values for style channel '{channel}'. "
+        f"Add plotting.style_values['{channel}']."
+    )
+
+
+def build_method_style_plan(
+    config: dict[str, Any],
+    plotting_cfg: dict[str, Any],
+    method: str,
+    method_runs: list[dict[str, Any]],
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    methods_cfg = config.get("methods", {})
+    method_cfg_raw = methods_cfg.get(method, {}) if isinstance(methods_cfg, dict) else {}
+    method_cfg = method_cfg_raw if isinstance(method_cfg_raw, dict) else {}
+
+    param_order = _method_param_order(method_cfg, method_runs)
+    varying_keys = get_varying_keys_in_order(method_runs, param_order)
+
+    channels = plotting_cfg.get("style_channels", DEFAULT_STYLE_CHANNELS)
+    if not isinstance(channels, list):
+        raise ValueError("plotting.style_channels must be a list")
+    if not channels:
+        raise ValueError("plotting.style_channels must not be empty")
+
+    channel_value_maps: dict[str, dict[str, Any]] = {}
+    method_colormaps = plotting_cfg.get("method_colormaps", {})
+    cmap_name = str(method_colormaps.get(method, "viridis"))
+
+    for channel_idx, channel in enumerate(channels):
+        param_key = param_order[channel_idx] if channel_idx < len(param_order) else None
+
+        if channel == "color":
+            if param_key is None:
+                colors = _sample_colormap(method, cmap_name, 1)
+                channel_value_maps[channel] = {
+                    "param_key": None,
+                    "value_map": {},
+                    "default": colors[0],
+                }
+                continue
+
+            value_order = _value_order_for_param(method_cfg, param_key, method_runs)
+            if len(value_order) > 1:
+                colors = _sample_colormap(method, cmap_name, len(value_order))
+                channel_value_maps[channel] = {
+                    "param_key": param_key,
+                    "value_map": {
+                        value: colors[i] for i, value in enumerate(value_order)
+                    },
+                    "default": colors[0],
+                }
+            else:
+                colors = _sample_colormap(method, cmap_name, 1)
+                channel_value_maps[channel] = {
+                    "param_key": param_key,
+                    "value_map": {},
+                    "default": colors[0],
+                }
+            continue
+
+        channel_values = _values_for_style_channel(plotting_cfg, channel)
+        value_map: dict[Any, Any] = {}
+        if param_key is not None:
+            value_order = _value_order_for_param(method_cfg, param_key, method_runs)
+            if len(value_order) > 1:
+                value_map = {
+                    value: channel_values[i % len(channel_values)]
+                    for i, value in enumerate(value_order)
+                }
+
+        channel_value_maps[channel] = {
+            "param_key": param_key,
+            "value_map": value_map,
+            "default": channel_values[0],
+        }
+
+    return varying_keys, channel_value_maps
 
 
 def latex_key(key: str) -> str:
@@ -553,20 +748,62 @@ def build_method_label_latex(
 
 
 def style_for_run(
-    plotting_cfg: dict[str, Any],
-    method: str,
-    run_idx_within_method: int,
+    method_params: dict[str, Any],
+    channel_value_maps: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    colors = plotting_cfg.get("colors", {})
-    linestyles = plotting_cfg.get("linestyles", ["-", "--", ":", "-."])
-    linewidths = plotting_cfg.get("linewidths", [2.0, 1.5, 1.0])
-    markers = plotting_cfg.get("markers", ["o", "^", "s", "D", "x", "P"])
-    return {
-        "color": colors.get(method, "black"),
-        "linestyle": linestyles[run_idx_within_method % len(linestyles)],
-        "linewidth": linewidths[run_idx_within_method % len(linewidths)],
-        "marker": markers[run_idx_within_method % len(markers)],
-    }
+    style: dict[str, Any] = {}
+    for channel, spec in channel_value_maps.items():
+        param_key = spec["param_key"]
+        value_map = spec["value_map"]
+        default_value = spec["default"]
+        if param_key is None:
+            style[channel] = default_value
+            continue
+        param_value = method_params.get(param_key, None)
+        style[channel] = value_map.get(param_value, default_value)
+    return style
+
+
+SCATTER_STYLE_KWARGS = {
+    "alpha",
+    "c",
+    "cmap",
+    "color",
+    "edgecolors",
+    "facecolors",
+    "linestyle",
+    "linestyles",
+    "linewidth",
+    "linewidths",
+    "marker",
+    "norm",
+    "plotnonfinite",
+    "rasterized",
+    "vmax",
+    "vmin",
+    "zorder",
+}
+
+
+def filter_scatter_style_kwargs(
+    style_kwargs: dict[str, Any],
+    method: str,
+    warned: set[tuple[str, str]],
+) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in style_kwargs.items():
+        scatter_key = "linewidths" if key == "linewidth" else key
+        if scatter_key in SCATTER_STYLE_KWARGS:
+            out[scatter_key] = value
+            continue
+        warning_key = (method, key)
+        if warning_key not in warned:
+            tqdm.write(
+                f"[warn] style kwarg '{key}' for method '{method}' is not "
+                "supported by scatter; ignoring"
+            )
+            warned.add(warning_key)
+    return out
 
 
 def dynamic_legend_layout(labels: list[str], fig_width: float) -> tuple[int, float]:
@@ -635,7 +872,7 @@ def save_live_scatter_plot(
         y,
         s=float(plotting_cfg.get("scatter_size", 20)),
         alpha=float(plotting_cfg.get("method_alpha", 0.55)),
-        color=plotting_cfg.get("colors", {}).get("diagnostic", "#444444"),
+        color=plotting_cfg.get("diagnostic_color", "#444444"),
     )
 
     try:
@@ -669,18 +906,19 @@ def save_live_scatter_plot(
 
 
 def save_convergence_plots(
+    config: dict[str, Any],
     runs: list[dict[str, Any]],
-    plotting_cfg: dict[str, Any],
     output_dir: Path,
 ) -> None:
+    plotting_cfg = config.get("plotting", {})
     distributions = sorted({run["distribution"] for run in runs})
     for distribution in distributions:
         dist_runs = [run for run in runs if run["distribution"] == distribution]
         method_runs_map: dict[str, list[dict[str, Any]]] = {}
         for run in dist_runs:
             method_runs_map.setdefault(run["method"], []).append(run)
-        varying_keys_map = {
-            method: get_varying_keys(method_runs)
+        style_plan_map: dict[str, tuple[list[str], dict[str, dict[str, Any]]]] = {
+            method: build_method_style_plan(config, plotting_cfg, method, method_runs)
             for method, method_runs in method_runs_map.items()
         }
 
@@ -688,15 +926,13 @@ def save_convergence_plots(
             1, 2, figsize=tuple(plotting_cfg.get("figsize", [16, 6]))
         )
 
-        per_method_counts: dict[str, int] = {}
         used_labels: dict[str, int] = {}
         for run in dist_runs:
             m = run["method"]
-            idx = per_method_counts.get(m, 0)
-            per_method_counts[m] = idx + 1
-            style = style_for_run(plotting_cfg, m, idx)
+            varying_keys, channel_value_maps = style_plan_map[m]
+            style = style_for_run(run["method_params"], channel_value_maps)
             label = build_method_label_latex(
-                m, run["method_params"], varying_keys_map[m]
+                m, run["method_params"], varying_keys
             )
             if label in used_labels:
                 used_labels[label] += 1
@@ -705,17 +941,13 @@ def save_convergence_plots(
                 used_labels[label] = 1
             axes[0].plot(
                 run["energy_history"],
-                color=style["color"],
-                linestyle=style["linestyle"],
-                linewidth=style["linewidth"],
                 label=label,
+                **style,
             )
             axes[1].plot(
                 run["riemann_grad_history"],
-                color=style["color"],
-                linestyle=style["linestyle"],
-                linewidth=style["linewidth"],
                 label=label,
+                **style,
             )
 
         axes[0].set_title(f"Energy history ({distribution})")
@@ -804,12 +1036,29 @@ def save_scatter_plots(
 
     for distribution in distributions:
         dist_runs = [run for run in runs if run["distribution"] == distribution]
+        method_runs_map: dict[str, list[dict[str, Any]]] = {}
+        for run in dist_runs:
+            method_runs_map.setdefault(run["method"], []).append(run)
+        style_plan_map: dict[str, tuple[list[str], dict[str, dict[str, Any]]]] = {
+            method: build_method_style_plan(
+                config, plotting_cfg, method, method_runs
+            )
+            for method, method_runs in method_runs_map.items()
+        }
+        warned_scatter_kwargs: set[tuple[str, str]] = set()
+
         gf_runs = [run for run in dist_runs if run["method"] == "gradient_flow"]
         if not gf_runs:
             print(f"[warn] skip scatter for {distribution}: no gradient_flow run")
             continue
         gf_baseline = gf_runs[0]
-        gf_varying_keys = get_varying_keys(gf_runs)
+        gf_varying_keys, gf_channel_maps = style_plan_map["gradient_flow"]
+        gf_style = style_for_run(gf_baseline["method_params"], gf_channel_maps)
+        gf_scatter_style = filter_scatter_style_kwargs(
+            gf_style,
+            "gradient_flow",
+            warned_scatter_kwargs,
+        )
         gf_model = restore_model_from_run(gf_baseline, checkpoint_root)
         gf_samples = generate_samples(gf_model, dim, n_samples, seed=123)
 
@@ -824,7 +1073,7 @@ def save_scatter_plots(
             fig, ax = plt.subplots(
                 figsize=tuple(plotting_cfg.get("scatter_figsize", [8, 8]))
             )
-            method_varying_keys = get_varying_keys(method_runs)
+            method_varying_keys, method_channel_maps = style_plan_map[method]
             used_labels: dict[str, int] = {}
 
             gf_label = build_method_label_latex(
@@ -835,14 +1084,19 @@ def save_scatter_plots(
                 gf_samples[:, 1],
                 s=float(plotting_cfg.get("scatter_size", 20)),
                 alpha=float(plotting_cfg.get("gf_alpha", 0.5)),
-                color=plotting_cfg.get("colors", {}).get("gradient_flow", "blue"),
                 label=gf_label,
+                **gf_scatter_style,
             )
             used_labels[gf_label] = 1
 
             all_method_samples = []
             for idx, run in enumerate(method_runs):
-                style = style_for_run(plotting_cfg, method, idx)
+                style = style_for_run(run["method_params"], method_channel_maps)
+                scatter_style = filter_scatter_style_kwargs(
+                    style,
+                    method,
+                    warned_scatter_kwargs,
+                )
                 model = restore_model_from_run(run, checkpoint_root)
                 samples = generate_samples(model, dim, n_samples, seed=1000 + idx)
                 all_method_samples.append(samples)
@@ -859,9 +1113,8 @@ def save_scatter_plots(
                     samples[:, 1],
                     s=float(plotting_cfg.get("scatter_size", 20)),
                     alpha=float(plotting_cfg.get("method_alpha", 0.5)),
-                    color=style["color"],
-                    marker=style["marker"],
                     label=label,
+                    **scatter_style,
                 )
 
             try:
@@ -945,7 +1198,9 @@ def _prepare_planned_runs(config: dict[str, Any]) -> list[dict[str, Any]]:
                 p.setdefault("max_iterations", common.get("max_iterations", 300))
                 p.setdefault("tolerance", common.get("tolerance", 1e-4))
                 candidate_runs.append({"method_params": p})
-            varying_keys_lookup[(dist["name"], method)] = get_varying_keys(candidate_runs)
+            varying_keys_lookup[(dist["name"], method)] = get_varying_keys_in_order(
+                candidate_runs, list(m_cfg.keys())
+            )
 
     planned_runs: list[dict[str, Any]] = []
     run_counter = 0
@@ -1566,7 +1821,7 @@ def main() -> None:
             )
         plots_dir = h5_path.parent / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
-        save_convergence_plots(loaded_runs, loaded_config["plotting"], plots_dir)
+        save_convergence_plots(loaded_config, loaded_runs, plots_dir)
         save_scatter_plots(loaded_config, loaded_runs, h5_path.parent, plots_dir)
         return
 
@@ -1575,7 +1830,7 @@ def main() -> None:
     plots_dir = benchmark_dir / "plots"
     run_all(config, benchmark_dir)
     config_for_scatter, runs_for_scatter = load_runs_from_h5(output_h5)
-    save_convergence_plots(runs_for_scatter, config_for_scatter["plotting"], plots_dir)
+    save_convergence_plots(config_for_scatter, runs_for_scatter, plots_dir)
     save_scatter_plots(config_for_scatter, runs_for_scatter, benchmark_dir, plots_dir)
 
 

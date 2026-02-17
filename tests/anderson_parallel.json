@@ -1,24 +1,27 @@
 {
-  "output_root": "results/st_short",
+  "experiment_name": "method_benchmark",
+  "output_root": "results/anderson_parallel",
   "common_params": {
     "seed": 0,
     "dimension": 50,
     "n_hidden": 2,
-    "width_hidden": 32,
+    "width_hidden": 128,
     "parametric_map": "node",
     "rhs_model": "mlp",
     "activation_fn": "tanh",
     "time_dependent": true,
     "ode_solver": "euler",
-    "dt0": 0.2,
+    "dt0": 0.1,
     "ref_density": "gaussian",
-    "scale_factor": 1.0,
-    "stepsize": 0.005,
-    "N_samples": 300,
-    "eval_samples": 5,
+    "scale_factor": 0.1,
+    "stepsize": 0.001,
+    "N_samples": 3000,
+    "eval_samples": 100,
     "plot_n_samples": 100,
-    "max_iterations": 10,
-    "live_plot_every": 5
+    "max_iterations": 3000,
+    "tolerance": 0.0001,
+    "linear_solver": "cg",
+    "live_plot_every": 50
   },
   "distributions": [
     {
@@ -29,26 +32,28 @@
     "gradient_flow": {
     },
     "anderson": {
-      "relaxation": [1.0, 1.8],
-      "regularization": [1e-3, 1e-1],
-      "regularization_kind": ["l2", "adaptive"]
+      "relaxation": [1.00, 1.25],
+      "regularization": [1e-1, 1e-3],
+      "regularization_kind": ["l2", "adaptive"],
+      "solver": ["cg"],
+      "memory_size": [8],
+      "ensure_descent": [true]
     }
+  
   },
-  "plotting": {
+  "parallel": {"max_workers": 9, "gpu_ids": [0, 1, 2], "disable_preallocate": true},
+    "plotting": {
     "figsize": [17, 6],
     "scatter_figsize": [8, 8],
     "method_colormaps": {
       "gradient_flow": "Blues",
-      "anderson": "Reds"
+      "anderson": "Greens"
     },
     "style_channels": ["color", "linestyle", "linewidth", "marker"],
     "style_values": {
       "linestyle": ["-", "--", ":", "-.", "-"],
       "linewidth": [2.3, 1.9, 1.5, 1.2, 1.0],
       "marker": ["o", "^", "s", "D", "x", "P", "*", "v"]
-    },
-    "scatter_size": 22,
-    "gf_alpha": 0.45,
-    "method_alpha": 0.55
+    }
   }
 }
