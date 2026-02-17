@@ -999,8 +999,11 @@ def restore_model_from_run(
             f"Missing checkpoint for run {run.get('run_id', '<unknown>')}: {ckpt_path}"
         )
     checkpointer = ocp.PyTreeCheckpointer()
+    restore_args = orbax_utils.restore_args_from_target(template_state)
     restored_state = checkpointer.restore(
-        str(ckpt_path.absolute()), item=template_state
+        str(ckpt_path.absolute()),
+        item=template_state,
+        restore_args=restore_args,
     )
     nnx.update(model, restored_state)
     return model
