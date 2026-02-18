@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
+import os
+
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 import argparse
 import gc
 import itertools
 import json
 import multiprocessing as mp
-import os
 import queue
 import re
 import time
@@ -207,17 +210,25 @@ def build_problem(
             sigma_diag = jnp.asarray(distribution_cfg["sigma_diag"], dtype=jnp.float32)
             if sigma_diag.shape[0] != dim:
                 raise ValueError("gaussian sigma_diag length must match dimension")
+        elif "sigma_min" in distribution_cfg and "sigma_max" in distribution_cfg:
+            sigma_diag = jnp.linspace(
+                distribution_cfg["sigma_min"],
+                distribution_cfg["sigma_max"],
+                dim,
+                endpoint=True,
+            )
+            sigma_diag = jnp.roll(sigma_diag, 1)
         else:
-            sigma_diag = jnp.ones((dim,), dtype=jnp.float32)
-            if dim >= 1:
-                sigma_diag = sigma_diag.at[0].set(
-                    float(distribution_cfg.get("sigma_first", 1000.0))
-                )
-            if dim >= 2:
-                sigma_diag = sigma_diag.at[1].set(
-                    float(distribution_cfg.get("sigma_second", 10.0))
-                )
-        sigma_inv = jnp.diag(sigma_diag)
+            raise ValueError(
+                'Need to specify either the diagonal entries of the covariance matrix ("sigma_diag") or their range ("sigma_min" and "sigma_max")'
+                f"Got {distribution_cfg}"
+            )
+        sigma_inv = jnp.diag(1.0 / sigma_diag)
+        if "orth_seed" in distribution_cfg:
+            rs = distribution_cfg["orth_seed"]
+            key = jax.random.key(rs)
+            U = jax.random.orthogonal(key, dim)
+            sigma_inv = U.T @ sigma_inv @ U
         potential_fn = get_gaussian_potential(mean, sigma_inv)
     elif dist_name in {"double-banana", "double_banana", "double banana"}:
         shift_2d = distribution_cfg.get("shift", [0.0, 10.0])
@@ -683,7 +694,9 @@ def build_method_style_plan(
     method_runs: list[dict[str, Any]],
 ) -> tuple[list[str], dict[str, dict[str, Any]]]:
     methods_cfg = config.get("methods", {})
-    method_cfg_raw = methods_cfg.get(method, {}) if isinstance(methods_cfg, dict) else {}
+    method_cfg_raw = (
+        methods_cfg.get(method, {}) if isinstance(methods_cfg, dict) else {}
+    )
     method_cfg = method_cfg_raw if isinstance(method_cfg_raw, dict) else {}
 
     param_order = _method_param_order(method_cfg, method_runs)
@@ -945,8 +958,9 @@ def save_convergence_plots(
     runs: list[dict[str, Any]],
     output_dir: Path,
 ) -> None:
-    plotting_cfg = config.get("plotting", {})
+    plotting_cfg : dict = config.get("plotting", {})
     distributions = sorted({run["distribution"] for run in runs})
+    guess_min = plotting_cfg.get('guess_min', False)
     for distribution in distributions:
         dist_runs = [run for run in runs if run["distribution"] == distribution]
         method_runs_map: dict[str, list[dict[str, Any]]] = {}
@@ -961,21 +975,24 @@ def save_convergence_plots(
             1, 2, figsize=tuple(plotting_cfg.get("figsize", [16, 6]))
         )
 
+        if guess_min:
+            e_min = min(jnp.min(run["energy_history"]) for run in dist_runs) - 1e-6
+        else:
+            e_min = 0.
+
         used_labels: dict[str, int] = {}
         for run in dist_runs:
             m = run["method"]
             varying_keys, channel_value_maps = style_plan_map[m]
             style = style_for_run(run["method_params"], channel_value_maps)
-            label = build_method_label_latex(
-                m, run["method_params"], varying_keys
-            )
+            label = build_method_label_latex(m, run["method_params"], varying_keys)
             if label in used_labels:
                 used_labels[label] += 1
                 label = label[:-1] + rf"\;\mathrm{{(run\ {used_labels[label]})}}$"
             else:
                 used_labels[label] = 1
             axes[0].plot(
-                run["energy_history"],
+                run["energy_history"] - e_min,
                 label=label,
                 **style,
             )
@@ -984,6 +1001,10 @@ def save_convergence_plots(
                 label=label,
                 **style,
             )
+
+        if guess_min:
+            axes[0].set_yscale('log')
+        axes[1].set_yscale('log')
 
         axes[0].set_title(f"Energy history ({distribution})")
         axes[1].set_title(f"Riemannian gradient history ({distribution})")
@@ -1078,9 +1099,7 @@ def save_scatter_plots(
         for run in dist_runs:
             method_runs_map.setdefault(run["method"], []).append(run)
         style_plan_map: dict[str, tuple[list[str], dict[str, dict[str, Any]]]] = {
-            method: build_method_style_plan(
-                config, plotting_cfg, method, method_runs
-            )
+            method: build_method_style_plan(config, plotting_cfg, method, method_runs)
             for method, method_runs in method_runs_map.items()
         }
         warned_scatter_kwargs: set[tuple[str, str]] = set()
@@ -1430,7 +1449,9 @@ def _parallel_worker_loop(
             if not platform_name:
                 match = re.search(r"(cpu|gpu|cuda)", str(device_obj).lower())
                 if match is not None:
-                    platform_name = "gpu" if match.group(1) in {"gpu", "cuda"} else "cpu"
+                    platform_name = (
+                        "gpu" if match.group(1) in {"gpu", "cuda"} else "cpu"
+                    )
 
             is_gpu = platform_name in {"gpu", "cuda"}
             return is_gpu, str(device_obj)
@@ -1529,7 +1550,9 @@ def run_all(config: dict[str, Any], benchmark_dir: Path) -> dict[str, int]:
     failed_count = 0
     fail_fast = bool(config.get("fail_fast", False))
     max_workers = int(config.get("parallel", {}).get("max_workers", 1))
-    outer_bar = tqdm(total=total_runs, desc="Benchmark", position=0, leave=True, unit="run")
+    outer_bar = tqdm(
+        total=total_runs, desc="Benchmark", position=0, leave=True, unit="run"
+    )
 
     if max_workers <= 1:
         try:
