@@ -451,10 +451,15 @@ def run_single(
 
 
 def initialize_h5(path: Path, config: dict[str, Any]) -> None:
+    filtered_config = {
+        key: value
+        for key, value in config.items()
+        if key not in {"plotting", "parallel"}
+    }
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as h5:
         h5.attrs["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        h5.attrs["config_json"] = json.dumps(config)
+        h5.attrs["config_json"] = json.dumps(filtered_config)
         h5.attrs["run_count"] = 0
         h5.create_group("runs")
 
@@ -480,9 +485,37 @@ def append_run_to_h5(path: Path, run_id: str, run: dict[str, Any]) -> None:
         h5.flush()
 
 
-def load_runs_from_h5(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def load_experiment_config_from_h5(path: Path) -> dict[str, Any]:
     with h5py.File(path, "r") as h5:
-        config = json.loads(h5.attrs["config_json"])
+        raw = h5.attrs.get("config_json", "{}")
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    loaded = json.loads(str(raw))
+    if not isinstance(loaded, dict):
+        raise ValueError("Invalid config_json in .h5: expected dict")
+    return {
+        key: value
+        for key, value in loaded.items()
+        if key not in {"plotting", "parallel"}
+    }
+
+
+def make_plot_config(
+    current_config: dict[str, Any], experiment_config_h5: dict[str, Any]
+) -> dict[str, Any]:
+    config_for_plot = dict(experiment_config_h5)
+    config_for_plot["plotting"] = dict(current_config.get("plotting", {}))
+    if "methods" not in config_for_plot:
+        config_for_plot["methods"] = dict(current_config.get("methods", {}))
+    if "common_params" not in config_for_plot:
+        config_for_plot["common_params"] = dict(current_config.get("common_params", {}))
+    if "distributions" not in config_for_plot:
+        config_for_plot["distributions"] = []
+    return config_for_plot
+
+
+def load_runs_from_h5(path: Path) -> list[dict[str, Any]]:
+    with h5py.File(path, "r") as h5:
         out: list[dict[str, Any]] = []
         for run_id in sorted(h5["runs"].keys()):
             grp = h5["runs"][run_id]
@@ -504,7 +537,7 @@ def load_runs_from_h5(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]
                     ),
                 }
             )
-    return config, out
+    return out
 
 
 KEY_LABELS = {
@@ -667,7 +700,9 @@ def build_method_style_plan(
     cmap_name = str(method_colormaps.get(method, "viridis"))
 
     for channel_idx, channel in enumerate(channels):
-        param_key = param_order[channel_idx] if channel_idx < len(param_order) else None
+        param_key = (
+            varying_keys[channel_idx] if channel_idx < len(varying_keys) else None
+        )
 
         if channel == "color":
             if param_key is None:
@@ -1810,7 +1845,9 @@ def main() -> None:
         h5_path = latest_h5(output_root)
         if h5_path is None or not h5_path.exists():
             raise FileNotFoundError("No .h5 file found for --plot-only mode")
-        loaded_config, loaded_runs = load_runs_from_h5(h5_path)
+        experiment_config_h5 = load_experiment_config_from_h5(h5_path)
+        loaded_runs = load_runs_from_h5(h5_path)
+        plot_config = make_plot_config(config, experiment_config_h5)
         missing_ckpts = [
             str((h5_path.parent / run["model_ckpt_relpath"]))
             for run in loaded_runs
@@ -1824,17 +1861,19 @@ def main() -> None:
             )
         plots_dir = h5_path.parent / "plots"
         plots_dir.mkdir(parents=True, exist_ok=True)
-        save_convergence_plots(loaded_config, loaded_runs, plots_dir)
-        save_scatter_plots(loaded_config, loaded_runs, h5_path.parent, plots_dir)
+        save_convergence_plots(plot_config, loaded_runs, plots_dir)
+        save_scatter_plots(plot_config, loaded_runs, h5_path.parent, plots_dir)
         return
 
     benchmark_dir = create_benchmark_session_dir(output_root)
     output_h5 = benchmark_dir / "results.h5"
     plots_dir = benchmark_dir / "plots"
     run_all(config, benchmark_dir)
-    config_for_scatter, runs_for_scatter = load_runs_from_h5(output_h5)
-    save_convergence_plots(config_for_scatter, runs_for_scatter, plots_dir)
-    save_scatter_plots(config_for_scatter, runs_for_scatter, benchmark_dir, plots_dir)
+    experiment_config_h5 = load_experiment_config_from_h5(output_h5)
+    runs_for_scatter = load_runs_from_h5(output_h5)
+    plot_config = make_plot_config(config, experiment_config_h5)
+    save_convergence_plots(plot_config, runs_for_scatter, plots_dir)
+    save_scatter_plots(plot_config, runs_for_scatter, benchmark_dir, plots_dir)
 
 
 if __name__ == "__main__":

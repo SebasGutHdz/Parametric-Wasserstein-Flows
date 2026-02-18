@@ -46,14 +46,13 @@
     "figsize": [17, 6],
     "scatter_figsize": [8, 8],
     "method_colormaps": {
-      "gradient_flow": "Blues",
-      "anderson": "Greens"
+      "gradient_flow": "Greens",
+      "anderson": "coolwarm"
     },
-    "style_channels": ["color", "linestyle", "linewidth", "marker"],
+    "style_channels": ["color", "linestyle", "linewidth"],
     "style_values": {
       "linestyle": ["-", "--", ":", "-.", "-"],
-      "linewidth": [2.3, 1.9, 1.5, 1.2, 1.0],
-      "marker": ["o", "^", "s", "D", "x", "P", "*", "v"]
+      "linewidth": [1.5, 3.0]
     }
   }
 }
