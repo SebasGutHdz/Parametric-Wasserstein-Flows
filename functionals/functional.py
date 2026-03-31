@@ -4,7 +4,7 @@ import sys
 # Add the parent directory to the system path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from typing import Optional, Union
+from typing import Optional, Union, Generator
 from jaxtyping import PyTree, Array
 import jax.numpy as jnp
 from flax import nnx
@@ -194,3 +194,4 @@ class Potential:
         )(params)
 
         return energy_grad, energy, energy_breakdown
+
