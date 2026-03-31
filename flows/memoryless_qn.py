@@ -42,7 +42,7 @@ def memoryless_qn_method(
         "Li-Fukushima", "Powell"
     ] = "Li-Fukushima",  # choice of z_{k-1}
     spectral_scaling: bool = True,
-    convergence_tol: float = 1e-6,
+    convergence_tol: float = 1e-12,
     plot_intermediate=False,
     plot_frequency: int = 10,
     save_param_trajectory=False,

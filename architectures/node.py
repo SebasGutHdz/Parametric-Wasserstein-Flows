@@ -216,6 +216,7 @@ class NeuralODE(nnx.Module):
         else:
             t_list = jnp.arange(t_span[0], t_span[1] - self.dt0, -self.dt0)
 
+
         y = self.solver(vector_field, t_list, y0, history=history)
 
         if history:
@@ -238,6 +239,8 @@ class NeuralODE(nnx.Module):
             return divergence_vf(model, t, x, self.time_dependent)
         elif method == "hutchinson":
             return divergence_vf_hutch(model, t, x, self.time_dependent, num_samples=50)
+        else:
+            raise ValueError(f"Divergence {method=} unsupported")
 
     def jacobian_grad_and_div(
         self,

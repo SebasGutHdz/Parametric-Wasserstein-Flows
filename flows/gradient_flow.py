@@ -189,19 +189,14 @@ def run_gradient_flow(
                 current_parametric_model, z_samples, current_params
             )
         # Early stopping conditions
-        if iteration > 1 and jnp.abs(current_energy) < tolerance:
-            if verbose:
-                print(f"Converged! Energy below tolerance at iteration {iteration}")
-            break
-
-        if (
-            iteration > 5
-            and abs(energy_history[-1] - energy_history[-2]) < tolerance * 1e-2
-        ):
-            if verbose:
-                print(f"Energy increment below tolerance at {iteration}")
-            break
-
+#        if (
+#            iteration > 5
+#            and abs(energy_history[-1] - energy_history[-2]) < tolerance * 1e-2
+#        ):
+#            if verbose:
+#                print(f"Energy increment below tolerance at {iteration}")
+#            break
+#
     if p_bar is not None:
         p_bar.close()
 
