@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import os
-
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import argparse
@@ -328,7 +327,6 @@ def run_single(
 
     n_samples = int(common["N_samples"])
     max_iterations = int(common.get("max_iterations", 300))
-    stepsize = float(common["stepsize"])
     tolerance = float(common.get("tolerance", 1e-4))
     solver = common.get("linear_solver", "cg")
     z_samples = sample_reference(
@@ -344,7 +342,7 @@ def run_single(
             g_mat,
             potential,
             N_samples=n_samples,
-            h=float(method_params.get("stepsize", stepsize)),
+            h=float(method_params.get("stepsize", common.get("stepsize", 1e-3))),
             solver=str(method_params.get("solver", solver)),
             max_iterations=int(method_params.get("max_iterations", max_iterations)),
             tolerance=float(method_params.get("tolerance", tolerance)),
@@ -372,14 +370,14 @@ def run_single(
             potential=potential,
             initial_params=init_params,
             n_iterations=int(method_params.get("max_iterations", max_iterations)),
-            step_size=float(method_params.get("stepsize", stepsize)),
+            step_size=float(method_params.get("stepsize", common.get("stepsize", 1e-3))),
             memory_size=int(method_params.get("memory_size", 8)),
-            relaxation=float(method_params.get("relaxation", 1.8)),
+            relaxation=float(method_params.get("relaxation", 1.0)),
             anderson_tol=float(method_params.get("anderson_tol", 1e-6)),
             solver=str(method_params.get("solver", solver)),
             solver_tol=float(method_params.get("solver_tol", tolerance)),
             solver_maxiter=int(method_params.get("solver_maxiter", 50)),
-            regularization=float(method_params.get("regularization", 1e-6)),
+            regularization=float(method_params.get("regularization", common.get('regularization', 1e-6))),
             convergence_tol=float(method_params.get("tolerance", tolerance)),
             plot_intermediate=False,
             plot_frequency=int(
@@ -387,7 +385,7 @@ def run_single(
             ),
             save_param_trajectory=False,
             regularization_factor_gamma=float(
-                method_params.get("regularization", 1e-3)
+                method_params.get("regularization_factor_gamma", 1e-3)
             ),
             regularization_method_gamma=str(
                 method_params.get("regularization_kind", "l2")
@@ -1251,7 +1249,7 @@ def _prepare_planned_runs(config: dict[str, Any]) -> list[dict[str, Any]]:
             candidate_runs: list[dict[str, Any]] = []
             for params in method_grid(m_cfg):
                 p = dict(params)
-                p.setdefault("stepsize", common["stepsize"])
+                p.setdefault("stepsize", common.get("stepsize", 1e-4))
                 p.setdefault("max_iterations", common.get("max_iterations", 300))
                 p.setdefault("tolerance", common.get("tolerance", 1e-4))
                 candidate_runs.append({"method_params": p})
@@ -1265,7 +1263,7 @@ def _prepare_planned_runs(config: dict[str, Any]) -> list[dict[str, Any]]:
         for method, m_cfg in config["methods"].items():
             for params in method_grid(m_cfg):
                 p = dict(params)
-                p.setdefault("stepsize", common["stepsize"])
+                p.setdefault("stepsize", common.get("stepsize", 1e-4))
                 p.setdefault("max_iterations", common.get("max_iterations", 300))
                 p.setdefault("tolerance", common.get("tolerance", 1e-4))
                 dist_slug = sanitize_component(dist["name"])
