@@ -40,7 +40,7 @@ def anderson_step(
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
     regularization_factor_gamma: float = 1e-6,
-    regularization_method_gamma: float = 1e-6,
+    regularization_method_gamma: Literal["l2", "adaptive"] = "l2",
     ensure_descent: bool = False,
 ) -> Tuple[PyTree, List[PyTree], List[PyTree], Dict]:
     """

@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flax import nnx
 from jaxtyping import Array, PyTree
-from typing import Tuple, List, Dict, Optional, Callable, Any
+from typing import Tuple, List, Dict, Optional, Callable, Any, Literal
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jla
@@ -42,8 +42,8 @@ def anderson_method(
     plot_frequency: int = 10,
     save_param_trajectory=False,
     regularization_factor_gamma: float = 1e-6,
-    regularization_method_gamma: float = 1e-6,
-    ensure_descent: bool=False,
+    regularization_method_gamma: Literal["l2", "adaptive"] = "l2",
+    ensure_descent: bool = False,
     verbose: bool = True,
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     diagnostic_sample_size: Optional[int] = None,
@@ -194,7 +194,9 @@ def anderson_method(
             scatter_samples = None
             if diagnostic_sample_size is not None and diagnostic_sample_size > 0:
                 key, diag_key = jax.random.split(key)
-                z_diag = jax.random.normal(diag_key, (diagnostic_sample_size, problem_dim))
+                z_diag = jax.random.normal(
+                    diag_key, (diagnostic_sample_size, problem_dim)
+                )
                 scatter_samples = parametric_model(z_diag, params=current_params)
             progress_callback(
                 {
@@ -216,8 +218,8 @@ def anderson_method(
             )
             if plot_intermediate:
                 if iteration == 0:
-                    x_max = jnp.max(jnp.abs(x_samples[:,0])) * 1.1
-                    y_max = jnp.max(jnp.abs(x_samples[:,1])) * 1.1
+                    x_max = jnp.max(jnp.abs(x_samples[:, 0])) * 1.1
+                    y_max = jnp.max(jnp.abs(x_samples[:, 1])) * 1.1
                 # Display current samples of current model
                 plt.figure(figsize=(6, 6))
                 plt.scatter(
@@ -227,7 +229,7 @@ def anderson_method(
                 plt.xlabel("x1")
                 plt.ylabel("x2")
                 plt.xlim(-x_max, x_max)
-                plt.ylim(-y_max, y_max) 
+                plt.ylim(-y_max, y_max)
                 plt.axis("equal")
                 plt.legend()
                 plt.grid(True)
