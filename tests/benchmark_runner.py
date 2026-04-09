@@ -1671,8 +1671,26 @@ def create_benchmark_session_dir(output_root: Path) -> Path:
 
 
 def latest_h5(output_root: Path) -> Path | None:
-    files = sorted(output_root.glob("**/results.h5"), key=lambda p: p.stat().st_mtime)
+    if not output_root.exists():
+        return None
+
+    files = [
+        p
+        for p in output_root.glob("**/results*.h5")
+        if p.name == "results.h5"
+        or re.fullmatch(r"results__run_\d{4}\.h5", p.name) is not None
+    ]
+    files = sorted(files, key=lambda p: p.stat().st_mtime)
     return files[-1] if files else None
+
+
+def plots_dir_for_h5_path(h5_path: Path) -> Path:
+    if h5_path.name == "results.h5":
+        return h5_path.parent / "plots"
+    match = re.fullmatch(r"results__(run_\d{4})\.h5", h5_path.name)
+    if match is None:
+        return h5_path.parent / "plots"
+    return h5_path.parent / f"plots__{match.group(1)}"
 
 
 def _get_live_plot_every(common: dict[str, Any]) -> int | None:
@@ -1986,15 +2004,17 @@ def _parallel_worker_loop(
             )
 
 
-def run_all(config: dict[str, Any], benchmark_dir: Path) -> dict[str, int]:
+def run_all(
+    config: dict[str, Any],
+    benchmark_dir: Path,
+    output_h5: Path,
+    run_id: int | None = None,
+) -> dict[str, int]:
     common = config["common_params"]
     plotting_cfg = config.get("plotting", {})
-    output_h5 = benchmark_dir / "results.h5"
     ckpt_root = benchmark_dir / "model_checkpoints"
-    plots_root = benchmark_dir / "plots"
     diagnostic_root = benchmark_dir / "diagnostic_plots"
     ckpt_root.mkdir(parents=True, exist_ok=True)
-    plots_root.mkdir(parents=True, exist_ok=True)
     diagnostic_root.mkdir(parents=True, exist_ok=True)
     live_plot_every = _get_live_plot_every(common)
     plot_n_samples = int(common["plot_n_samples"])
@@ -2005,6 +2025,42 @@ def run_all(config: dict[str, Any], benchmark_dir: Path) -> dict[str, int]:
     success_count = 0
     failed_count = 0
     fail_fast = bool(config.get("fail_fast", False))
+
+    if run_id is not None:
+        selected_run = next(
+            (run for run in planned_runs if int(run["run_index"]) == int(run_id)),
+            None,
+        )
+        if selected_run is None:
+            if not planned_runs:
+                raise ValueError("No planned runs found in benchmark configuration")
+            min_run_id = min(int(run["run_index"]) for run in planned_runs)
+            max_run_id = max(int(run["run_index"]) for run in planned_runs)
+            raise ValueError(
+                f"Unknown run_id={run_id}. Valid run_index range: "
+                f"[{min_run_id}, {max_run_id}]"
+            )
+
+        try:
+            run, _ = _execute_planned_run(
+                planned_run=selected_run,
+                common=common,
+                plotting_cfg=plotting_cfg,
+                benchmark_dir=benchmark_dir,
+                live_plot_every=live_plot_every,
+                plot_n_samples=plot_n_samples,
+            )
+            append_run_to_h5(output_h5, str(selected_run["run_id"]), run)
+            success_count = 1
+        except Exception:
+            failed_count = 1
+            if fail_fast:
+                raise
+        finally:
+            jax.clear_caches()
+            gc.collect()
+        return {"success": success_count, "failed": failed_count}
+
     max_workers = int(config.get("parallel", {}).get("max_workers", 1))
     outer_bar = tqdm(
         total=total_runs, desc="Benchmark", position=0, leave=True, unit="run"
@@ -2311,17 +2367,43 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip runs and regenerate plots from existing .h5",
     )
+    parser.add_argument(
+        "--run-id",
+        type=int,
+        default=None,
+        help="Run only planned run with this numeric run_index",
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Output subdirectory name under output_root (used instead of timestamp)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.plot_only and args.run_id is not None:
+        raise ValueError("--plot-only and --run-id cannot be used together")
+
     config = load_config(args.config)
     output_root = Path(config["output_root"])
     output_root.mkdir(parents=True, exist_ok=True)
 
+    run_name_sanitized = None
+    if args.run_name is not None:
+        run_name_sanitized = sanitize_component(args.run_name)
+        if not run_name_sanitized:
+            raise ValueError("--run-name must contain at least one valid character")
+
+    selected_output_root = output_root
+    if run_name_sanitized is not None:
+        selected_output_root = output_root / run_name_sanitized
+        selected_output_root.mkdir(parents=True, exist_ok=True)
+
     if args.plot_only:
-        h5_path = latest_h5(output_root)
+        h5_path = latest_h5(selected_output_root)
         if h5_path is None or not h5_path.exists():
             raise FileNotFoundError("No .h5 file found for --plot-only mode")
         experiment_config_h5 = load_experiment_config_from_h5(h5_path)
@@ -2338,19 +2420,34 @@ def main() -> None:
                 "Some checkpoint directories referenced by this .h5 are missing. "
                 f"First missing entries:\n{preview}"
             )
-        plots_dir = h5_path.parent / "plots"
+        plots_dir = plots_dir_for_h5_path(h5_path)
         plots_dir.mkdir(parents=True, exist_ok=True)
         save_convergence_plots(plot_config, loaded_runs, plots_dir)
         save_scatter_plots(plot_config, loaded_runs, h5_path.parent, plots_dir)
         return
 
-    benchmark_dir = create_benchmark_session_dir(output_root)
-    output_h5 = benchmark_dir / "results.h5"
-    plots_dir = benchmark_dir / "plots"
-    run_all(config, benchmark_dir)
+    if run_name_sanitized is not None:
+        benchmark_dir = selected_output_root
+        benchmark_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        benchmark_dir = create_benchmark_session_dir(output_root)
+
+    run_suffix = None
+    if args.run_id is not None:
+        run_suffix = f"run_{int(args.run_id):04d}"
+
+    if run_suffix is None:
+        output_h5 = benchmark_dir / "results.h5"
+        plots_dir = benchmark_dir / "plots"
+    else:
+        output_h5 = benchmark_dir / f"results__{run_suffix}.h5"
+        plots_dir = benchmark_dir / f"plots__{run_suffix}"
+
+    run_all(config, benchmark_dir, output_h5=output_h5, run_id=args.run_id)
     experiment_config_h5 = load_experiment_config_from_h5(output_h5)
     runs_for_scatter = load_runs_from_h5(output_h5)
     plot_config = make_plot_config(config, experiment_config_h5)
+    plots_dir.mkdir(parents=True, exist_ok=True)
     save_convergence_plots(plot_config, runs_for_scatter, plots_dir)
     save_scatter_plots(plot_config, runs_for_scatter, benchmark_dir, plots_dir)
 
