@@ -1,5 +1,5 @@
 {
-  "output_root": "results/db_anderson_regularization",
+  "output_root": "results/mmd_8gaussians",
   "common_params": {
     "seed": 0,
     "dimension": 2,
@@ -12,57 +12,62 @@
     "ode_solver": "euler",
     "dt0": 0.1,
     "ref_density": "gaussian",
-    "scale_factor": 0.1,
-    "stepsize": 1e-4,
-    "N_samples": 3000,
-    "eval_samples": 300,
-    "plot_n_samples": 500,
-    "max_iterations": 6000,
-    "tolerance": 1e-20,
+    "scale_factor": 1.0,
+    "stepsize": 0.001,
+    "N_samples": 512,
+    "eval_samples": 128,
+    "plot_n_samples": 256,
+    "max_iterations": 50,
+    "tolerance": 0.0001,
     "linear_solver": "cg",
-    "regularization": 1e-6,
-    "live_plot_every": 100
-  },  
+    "live_plot_every": 10
+  },
   "problems": [
     {
       "functional": {
-        "kind": "KL"
+        "kind": "MMD",
+        "bw_multipliers": [0.1, 1.0, 10.0],
+        "bandwidth_samples": 512
       },
       "distribution": {
-        "name": "double-banana",
-      "shift": [0.0, 3.0]
+        "name": "8gaussians",
+        "n_samples": 2048,
+        "resample_each": 20,
+        "seed": 3
       }
     }
   ],
   "methods": {
-    "gradient_flow": {
-    },
+    "gradient_flow": {},
     "anderson": {
-      "relaxation": [1.00],
-      "regularization_factor_gamma": [1e-1, 1e-3, 1e-5, 1e-7],
-      "regularization_kind": ["l2", "adaptive"],
+      "relaxation": [1.0],
+      "regularization_factor_gamma": [1e-5],
+      "regularization_kind": ["adaptive"],
       "solver": ["cg"],
       "memory_size": [8],
-      "ensure_descent": [true],
-      "solver_tol": 1e-6,
-      "convergence_tol": [1e-20]
+      "ensure_descent": [true]
     }
-  
   },
-  "parallel": {"max_workers": 9, "gpu_ids": [0, 1, 2], "disable_preallocate": true},
-    "plotting": {
+  "parallel": {
+    "max_workers": 2,
+    "gpu_ids": [7],
+    "disable_preallocate": true
+  },
+  "plotting": {
     "figsize": [17, 6],
     "scatter_figsize": [8, 8],
-    "guess_min": true,
     "method_colormaps": {
-      "gradient_flow": "Greens",
-      "anderson": "coolwarm"
+      "gradient_flow": "Blues",
+      "anderson": "Reds"
     },
     "style_channels": ["color", "linestyle", "linewidth"],
     "style_values": {
-      "linestyle": ["-", "--", ":", "-.", "-"],
-      "linewidth": [1.5, 3.0]
+      "linestyle": ["-", "--", ":"],
+      "linewidth": [2.0, 1.5]
     },
+    "scatter_size": 22,
+    "gf_alpha": 0.45,
+    "method_alpha": 0.55,
     "target_scatter_size": 6.0,
     "target_scatter_alpha": 0.9,
     "target_scatter_marker": "*",

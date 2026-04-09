@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import argparse
@@ -374,9 +375,7 @@ def _build_kl_problem(
     return potential
 
 
-def checkerboard_generator(
-    n_samples: int, resample_each: int, seed: int = 3
-):
+def checkerboard_generator(n_samples: int, resample_each: int, seed: int = 3):
     key = jax.random.PRNGKey(seed)
     while True:
         key, points_key, shift_x_key, shift_y_key = jax.random.split(key, 4)
@@ -391,16 +390,45 @@ def checkerboard_generator(
             yield points
 
 
-def two_spirals_generator_stub(
-    n_samples: int, resample_each: int, seed: int = 3
-):
-    raise NotImplementedError("Toy distribution '2spirals' is not implemented yet")
+def two_spirals_generator(n_samples: int, resample_each: int, seed: int = 3):
+    key = jax.random.PRNGKey(seed)
+    while True:
+        key, n_key, shift_x_key, shift_y_key, noise_key = jax.random.split(key, 5)
+        n = (
+            jnp.sqrt(jax.random.uniform(n_key, (n_samples // 2, 1)))
+            * 540
+            * (2 * jnp.pi)
+            / 360
+        )
+        d1x = (
+            -jnp.cos(n) * n + jax.random.uniform(shift_x_key, (n_samples // 2, 1)) * 0.5
+        )
+        d1y = (
+            jnp.sin(n) * n + jax.random.uniform(shift_y_key, (n_samples // 2, 1)) * 0.5
+        )
+        x = jnp.vstack((jnp.hstack((d1x, d1y)), jnp.hstack((-d1x, -d1y)))) / 3
+        x += jax.random.uniform(noise_key, x.shape) * 0.1
+        for _ in range(resample_each):
+            yield x
 
 
-def eight_gaussians_generator_stub(
-    n_samples: int, resample_each: int, seed: int = 3
-):
-    raise NotImplementedError("Toy distribution '8gaussians' is not implemented yet")
+def eight_gaussians_generator(n_samples: int, resample_each: int, seed: int = 3):
+    theta = jnp.linspace(0., 2.*jnp.pi, 8)
+    centers = 4.*jnp.stack((jnp.cos(theta), jnp.sin(theta)) , axis=-1)
+    key = jax.random.PRNGKey(seed)
+
+    while True:
+        key, idx_key, blob_key = jax.random.split(key, 3)
+        blob = jax.random.normal(blob_key, (n_samples, 2)) * 0.5
+        shift_ids = jax.random.randint(idx_key, n_samples, minval=0, maxval=7)
+
+        x = blob + centers[shift_ids, :]
+        x /= 1.414
+
+        for _ in range(resample_each):
+            yield x
+    
+
 
 
 def file_dataset_generator_stub(file_path: str, n_samples: int, resample_each: int):
@@ -410,9 +438,7 @@ def file_dataset_generator_stub(file_path: str, n_samples: int, resample_each: i
     )
 
 
-def build_target_generator(
-    distribution_cfg: dict[str, Any], common: dict[str, Any]
-):
+def build_target_generator(distribution_cfg: dict[str, Any], common: dict[str, Any]):
     if "n_samples" not in distribution_cfg:
         raise ValueError("distribution.n_samples is required for generative problems")
     if "resample_each" not in distribution_cfg:
@@ -449,20 +475,19 @@ def build_target_generator(
                 seed=seed,
             )
         if dist_name == "2spirals":
-            return two_spirals_generator_stub(
+            return two_spirals_generator(
                 n_samples=n_samples,
                 resample_each=resample_each,
                 seed=seed,
             )
         if dist_name == "8gaussians":
-            return eight_gaussians_generator_stub(
+            return eight_gaussians_generator(
                 n_samples=n_samples,
                 resample_each=resample_each,
                 seed=seed,
             )
         raise ValueError(
-            "Unknown generative toy distribution name: "
-            f"{distribution_cfg['name']}"
+            "Unknown generative toy distribution name: " f"{distribution_cfg['name']}"
         )
 
     return file_dataset_generator_stub(
@@ -634,14 +659,18 @@ def run_single(
             potential=potential,
             initial_params=init_params,
             n_iterations=int(method_params.get("max_iterations", max_iterations)),
-            step_size=float(method_params.get("stepsize", common.get("stepsize", 1e-3))),
+            step_size=float(
+                method_params.get("stepsize", common.get("stepsize", 1e-3))
+            ),
             memory_size=int(method_params.get("memory_size", 8)),
             relaxation=float(method_params.get("relaxation", 1.0)),
             anderson_tol=float(method_params.get("anderson_tol", 1e-6)),
             solver=str(method_params.get("solver", solver)),
             solver_tol=float(method_params.get("solver_tol", tolerance)),
             solver_maxiter=int(method_params.get("solver_maxiter", 50)),
-            regularization=float(method_params.get("regularization", common.get('regularization', 1e-6))),
+            regularization=float(
+                method_params.get("regularization", common.get("regularization", 1e-6))
+            ),
             convergence_tol=float(method_params.get("tolerance", tolerance)),
             plot_intermediate=False,
             plot_frequency=int(
@@ -673,7 +702,9 @@ def run_single(
             potential=potential,
             initial_params=init_params,
             n_iterations=int(method_params.get("max_iterations", max_iterations)),
-            step_size=float(method_params.get("stepsize", common.get("stepsize", 1e-3))),
+            step_size=float(
+                method_params.get("stepsize", common.get("stepsize", 1e-3))
+            ),
             solver=str(method_params.get("solver", "cg")),
             solver_tol=float(method_params.get("solver_tol", tolerance)),
             solver_maxiter=int(method_params.get("solver_maxiter", 50)),
@@ -819,7 +850,9 @@ def load_runs_from_h5(path: Path) -> list[dict[str, Any]]:
             return normalize_problem_entry(loaded_problem)
 
         # Backward-compatible path for legacy .h5 entries.
-        legacy_distribution = _attr_to_str(attrs.get("distribution", "unknown"), "unknown")
+        legacy_distribution = _attr_to_str(
+            attrs.get("distribution", "unknown"), "unknown"
+        )
         legacy_kind = normalize_functional_kind(
             _attr_to_str(attrs.get("functional_kind", "KL"), "KL")
         )
@@ -1502,11 +1535,7 @@ def save_scatter_plots(
         gf_samples = generate_samples(gf_model, dim, n_samples, seed=123)
 
         methods = sorted(
-            {
-                run["method"]
-                for run in problem_runs
-                if run["method"] != "gradient_flow"
-            }
+            {run["method"] for run in problem_runs if run["method"] != "gradient_flow"}
         )
         for method in methods:
             method_runs = [run for run in problem_runs if run["method"] == method]

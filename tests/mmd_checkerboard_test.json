@@ -41,16 +41,16 @@
     "gradient_flow": {},
     "anderson": {
       "relaxation": [1.0],
-      "regularization": [0.001],
-      "regularization_kind": ["l2"],
+      "regularization_factor_gamma": [1e-5],
+      "regularization_kind": ["adaptive"],
       "solver": ["cg"],
       "memory_size": [8],
       "ensure_descent": [true]
     }
   },
   "parallel": {
-    "max_workers": 1,
-    "gpu_ids": [0],
+    "max_workers": 2,
+    "gpu_ids": [7],
     "disable_preallocate": true
   },
   "plotting": {
