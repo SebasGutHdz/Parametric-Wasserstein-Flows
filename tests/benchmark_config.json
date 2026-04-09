@@ -20,19 +20,34 @@
     "max_iterations": 3,
     "progress_every": 50
   },
-  "distributions": [
+  "problems": [
     {
-      "name": "gaussian",
-      "mean_value": 2.0,
-      "sigma_first": 1000.0,
-      "sigma_second": 10.0
+      "functional": {
+        "kind": "KL"
+      },
+      "distribution": {
+        "name": "gaussian",
+        "mean_value": 2.0,
+        "sigma_first": 1000.0,
+        "sigma_second": 10.0
+      }
     },
     {
-      "name": "double-banana",
-      "shift": [0.0, 10.0]
+      "functional": {
+        "kind": "KL"
+      },
+      "distribution": {
+        "name": "double-banana",
+        "shift": [0.0, 10.0]
+      }
     },
     {
-      "name": "styblinski-tang"
+      "functional": {
+        "kind": "KL"
+      },
+      "distribution": {
+        "name": "styblinski-tang"
+      }
     }
   ],
   "methods": {
@@ -62,6 +77,14 @@
       "linestyle": ["-", "--", ":", "-.", "-"],
       "linewidth": [2.3, 1.9, 1.5, 1.2, 1.0],
       "marker": ["o", "^", "s", "D", "x", "P", "*", "v"]
-    }
+    },
+    "target_scatter_size": 6.0,
+    "target_scatter_alpha": 0.9,
+    "target_scatter_marker": "*",
+    "target_scatter_facecolors": "none",
+    "target_scatter_edgecolors": "#111111",
+    "target_scatter_linewidths": 0.6,
+    "target_scatter_zorder": 5,
+    "target_scatter_label": "target"
   }
 }

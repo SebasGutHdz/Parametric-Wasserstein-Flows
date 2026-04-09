@@ -4,6 +4,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import argparse
 import gc
+import hashlib
 import itertools
 import json
 import multiprocessing as mp
@@ -11,6 +12,7 @@ import queue
 import re
 import time
 import traceback
+import warnings
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,6 +38,8 @@ sys.path.append(str(root_path))
 from flows.anderson_acceleration import anderson_method
 from flows.gradient_flow import run_gradient_flow
 from flows.memoryless_qn import memoryless_qn_method
+from functionals.CrossEntropy import CrossEntropyEnergy
+from functionals.MMD import MMDEnergy, bandwidth_median
 from functionals.functional import Potential
 from functionals.functions import get_gaussian_potential, styblinski_tang_potential_fn
 from functionals.internal_functional_class import InternalPotential
@@ -56,13 +60,138 @@ METHOD_ALIASES = {
 }
 
 
+FUNCTIONAL_KIND_ALIASES = {
+    "kl": "KL",
+    "mmd": "MMD",
+    "crossentropy": "CrossEntropy",
+    "cross-entropy": "CrossEntropy",
+    "cross_entropy": "CrossEntropy",
+}
+
+
+def normalize_functional_kind(kind_raw: Any) -> str:
+    key = str(kind_raw).strip().lower()
+    canonical = FUNCTIONAL_KIND_ALIASES.get(key)
+    if canonical is None:
+        raise ValueError(
+            "functional.kind must be one of: "
+            + ", ".join(sorted(set(FUNCTIONAL_KIND_ALIASES.values())))
+        )
+    return canonical
+
+
+def normalize_distribution_entry(distribution_cfg: Any) -> dict[str, Any]:
+    if isinstance(distribution_cfg, str):
+        return {"name": distribution_cfg}
+    if isinstance(distribution_cfg, dict):
+        return dict(distribution_cfg)
+    raise ValueError(f"Invalid distribution entry: {distribution_cfg}")
+
+
+def normalize_problem_entry(problem_cfg: Any) -> dict[str, Any]:
+    if not isinstance(problem_cfg, dict):
+        raise ValueError(f"Invalid problem entry: {problem_cfg}")
+    if "functional" not in problem_cfg or "distribution" not in problem_cfg:
+        raise ValueError(
+            "Each problem must define both 'functional' and 'distribution' keys"
+        )
+
+    functional_cfg_raw = problem_cfg["functional"]
+    if not isinstance(functional_cfg_raw, dict):
+        raise ValueError("problem.functional must be a dict")
+    if "name" in functional_cfg_raw:
+        raise ValueError("functional.name is not supported; use functional.kind")
+    if "kind" not in functional_cfg_raw:
+        raise ValueError("problem.functional.kind is required")
+
+    functional_cfg = dict(functional_cfg_raw)
+    functional_cfg["kind"] = normalize_functional_kind(functional_cfg["kind"])
+    distribution_cfg = normalize_distribution_entry(problem_cfg["distribution"])
+    return {
+        "functional": functional_cfg,
+        "distribution": distribution_cfg,
+    }
+
+
+def problem_grid(problems_cfg: list[Any]) -> list[dict[str, Any]]:
+    return [normalize_problem_entry(item) for item in problems_cfg]
+
+
+def distribution_label(distribution_cfg: dict[str, Any]) -> str:
+    if "name" in distribution_cfg:
+        return str(distribution_cfg["name"])
+    if "file" in distribution_cfg:
+        return f"file:{distribution_cfg['file']}"
+    return "unknown_distribution"
+
+
+def problem_key(problem_cfg: dict[str, Any]) -> str:
+    return json.dumps(problem_cfg, sort_keys=True)
+
+
+def problem_label(problem_cfg: dict[str, Any]) -> str:
+    kind = problem_cfg["functional"]["kind"]
+    return f"{kind} | {distribution_label(problem_cfg['distribution'])}"
+
+
+def problem_slug(problem_cfg: dict[str, Any]) -> str:
+    kind_slug = sanitize_component(problem_cfg["functional"]["kind"])
+    dist_cfg = problem_cfg["distribution"]
+    if "name" in dist_cfg:
+        dist_part = str(dist_cfg["name"])
+    elif "file" in dist_cfg:
+        dist_part = Path(str(dist_cfg["file"])).stem
+    else:
+        dist_part = "distribution"
+    digest = hashlib.sha1(problem_key(problem_cfg).encode("utf-8")).hexdigest()[:8]
+    return f"{kind_slug}__{sanitize_component(dist_part)}__{digest}"
+
+
+def _attr_to_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
 def load_config(config_path: Path) -> dict[str, Any]:
     with config_path.open("r", encoding="utf-8") as infile:
         config = json.load(infile)
 
-    for key in ["distributions", "common_params", "methods", "plotting"]:
+    for key in ["common_params", "methods", "plotting"]:
         if key not in config:
             raise ValueError(f"Missing required config key: {key}")
+
+    has_problems = "problems" in config
+    has_distributions = "distributions" in config
+    if has_problems and has_distributions:
+        raise ValueError(
+            "Config cannot define both 'problems' and deprecated 'distributions'"
+        )
+    if not has_problems and not has_distributions:
+        raise ValueError("Missing required config key: problems")
+
+    if has_distributions:
+        if not isinstance(config["distributions"], list):
+            raise ValueError("config['distributions'] must be a list")
+        warnings.warn(
+            "[warn] Top-level 'distributions' is deprecated and interpreted as KL "
+            "problems; please migrate to 'problems'.",
+            stacklevel=2,
+        )
+        config["problems"] = [
+            {
+                "functional": {"kind": "KL"},
+                "distribution": normalize_distribution_entry(dist_cfg),
+            }
+            for dist_cfg in config["distributions"]
+        ]
+        config.pop("distributions", None)
+
+    if not isinstance(config["problems"], list):
+        raise ValueError("config['problems'] must be a list")
+    config["problems"] = problem_grid(config["problems"])
 
     if not isinstance(config["methods"], dict):
         raise ValueError("config['methods'] must be a dict")
@@ -140,18 +269,6 @@ def sanitize_component(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "_", str(name).strip().lower())
 
 
-def distribution_grid(distributions_cfg: list[Any]) -> list[dict[str, Any]]:
-    out = []
-    for item in distributions_cfg:
-        if isinstance(item, str):
-            out.append({"name": item})
-        elif isinstance(item, dict) and "name" in item:
-            out.append(item)
-        else:
-            raise ValueError(f"Invalid distribution entry: {item}")
-    return out
-
-
 def build_model(
     common: dict[str, Any], seed: int
 ) -> tuple[ParametricModel, dict[str, Any]]:
@@ -196,10 +313,10 @@ def potential_double_banana(x: jnp.ndarray, shift: jnp.ndarray) -> jnp.ndarray:
     return log_density
 
 
-def build_problem(
+def _build_kl_problem(
     distribution_cfg: dict[str, Any], common: dict[str, Any]
-) -> tuple[Potential, dict[str, Any]]:
-    dist_name = distribution_cfg["name"].lower()
+) -> Potential:
+    dist_name = str(distribution_cfg["name"]).lower()
     dim = int(common["dimension"])
 
     if dist_name == "gaussian":
@@ -254,10 +371,156 @@ def build_problem(
     potential = Potential(
         linear=linear_potential, internal=internal_potential, interaction=None
     )
-    return potential, {"distribution": distribution_cfg}
+    return potential
+
+
+def checkerboard_generator(
+    n_samples: int, resample_each: int, seed: int = 3
+):
+    key = jax.random.PRNGKey(seed)
+    while True:
+        key, points_key, shift_x_key, shift_y_key = jax.random.split(key, 4)
+        points = jax.random.uniform(points_key, (n_samples, 2))
+        shifts_x = jax.random.randint(shift_x_key, (n_samples,), 0, 4) - 2
+        shifts_y = (
+            jax.random.randint(shift_y_key, (n_samples,), 0, 2) * 2 + shifts_x % 2 - 2
+        )
+        points = points.at[:, 0].add(shifts_x)
+        points = points.at[:, 1].add(shifts_y)
+        for _ in range(resample_each):
+            yield points
+
+
+def two_spirals_generator_stub(
+    n_samples: int, resample_each: int, seed: int = 3
+):
+    raise NotImplementedError("Toy distribution '2spirals' is not implemented yet")
+
+
+def eight_gaussians_generator_stub(
+    n_samples: int, resample_each: int, seed: int = 3
+):
+    raise NotImplementedError("Toy distribution '8gaussians' is not implemented yet")
+
+
+def file_dataset_generator_stub(file_path: str, n_samples: int, resample_each: int):
+    raise NotImplementedError(
+        "File-based dataset generator is not implemented yet "
+        f"(requested file: {file_path})"
+    )
+
+
+def build_target_generator(
+    distribution_cfg: dict[str, Any], common: dict[str, Any]
+):
+    if "n_samples" not in distribution_cfg:
+        raise ValueError("distribution.n_samples is required for generative problems")
+    if "resample_each" not in distribution_cfg:
+        raise ValueError(
+            "distribution.resample_each is required for generative problems"
+        )
+
+    n_samples = int(distribution_cfg["n_samples"])
+    resample_each = int(distribution_cfg["resample_each"])
+    if n_samples <= 0:
+        raise ValueError("distribution.n_samples must be > 0")
+    if resample_each <= 0:
+        raise ValueError("distribution.resample_each must be > 0")
+
+    has_name = "name" in distribution_cfg
+    has_file = "file" in distribution_cfg
+    if has_name == has_file:
+        raise ValueError(
+            "Generative distribution must define exactly one of 'name' or 'file'"
+        )
+
+    if has_name:
+        dist_name = str(distribution_cfg["name"]).lower()
+        seed = int(distribution_cfg.get("seed", 3))
+        if dist_name == "checkerboard":
+            dim = int(common["dimension"])
+            if dim != 2:
+                raise ValueError(
+                    "checkerboard generator currently supports only dimension=2"
+                )
+            return checkerboard_generator(
+                n_samples=n_samples,
+                resample_each=resample_each,
+                seed=seed,
+            )
+        if dist_name == "2spirals":
+            return two_spirals_generator_stub(
+                n_samples=n_samples,
+                resample_each=resample_each,
+                seed=seed,
+            )
+        if dist_name == "8gaussians":
+            return eight_gaussians_generator_stub(
+                n_samples=n_samples,
+                resample_each=resample_each,
+                seed=seed,
+            )
+        raise ValueError(
+            "Unknown generative toy distribution name: "
+            f"{distribution_cfg['name']}"
+        )
+
+    return file_dataset_generator_stub(
+        file_path=str(distribution_cfg["file"]),
+        n_samples=n_samples,
+        resample_each=resample_each,
+    )
+
+
+def build_problem(
+    problem_cfg: dict[str, Any], common: dict[str, Any]
+) -> tuple[Any, dict[str, Any]]:
+    problem = normalize_problem_entry(problem_cfg)
+    functional_cfg = dict(problem["functional"])
+    distribution_cfg = dict(problem["distribution"])
+    functional_kind = functional_cfg["kind"]
+
+    if functional_kind == "KL":
+        potential = _build_kl_problem(distribution_cfg, common)
+        return potential, {"problem": problem}
+
+    target_generator = build_target_generator(distribution_cfg, common)
+
+    if functional_kind == "MMD":
+        bw_multipliers_raw = functional_cfg.get("bw_multipliers", None)
+        if not isinstance(bw_multipliers_raw, list) or not bw_multipliers_raw:
+            raise ValueError(
+                "functional.bw_multipliers must be a non-empty list for MMD"
+            )
+        bw_multipliers = [float(v) for v in bw_multipliers_raw]
+        bandwidth_samples = int(functional_cfg.get("bandwidth_samples", 2000))
+        if bandwidth_samples < 2:
+            raise ValueError("functional.bandwidth_samples must be >= 2")
+
+        bw_reference = jnp.asarray(next(target_generator), dtype=jnp.float32)
+        bw_reference = bw_reference[: min(bandwidth_samples, bw_reference.shape[0])]
+        bw = float(bandwidth_median(bw_reference))
+        bandwidths = jnp.asarray(
+            [bw * mult for mult in bw_multipliers], dtype=jnp.float32
+        )
+        potential = MMDEnergy(target_generator, bandwidths)
+        return potential, {
+            "problem": problem,
+            "mmd_bandwidth_median": bw,
+            "mmd_bandwidths": [float(v) for v in np.asarray(bandwidths)],
+        }
+
+    if functional_kind == "CrossEntropy":
+        trace_method = str(functional_cfg.get("trace_method", "hutchinson"))
+        potential = CrossEntropyEnergy(target_generator, trace_method=trace_method)
+        return potential, {"problem": problem}
+
+    raise ValueError(f"Unsupported functional kind: {functional_kind}")
 
 
 def build_plot_potential_2d(distribution_cfg: dict[str, Any]) -> LinearPotential | None:
+    if "name" not in distribution_cfg:
+        return None
     name = distribution_cfg["name"].lower()
     if name == "gaussian":
         mean_value = float(distribution_cfg.get("mean_value", 2.0))
@@ -313,7 +576,7 @@ def save_model_checkpoint(final_model: ParametricModel, ckpt_dir: Path) -> None:
 def run_single(
     method: str,
     method_params: dict[str, Any],
-    distribution_cfg: dict[str, Any],
+    problem_cfg: dict[str, Any],
     common: dict[str, Any],
     run_seed: int,
     checkpoint_root: Path,
@@ -321,8 +584,9 @@ def run_single(
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     diagnostic_sample_size: int | None = None,
 ) -> dict[str, Any]:
+    problem = normalize_problem_entry(problem_cfg)
     model, model_cfg = build_model(common, run_seed)
-    potential, potential_meta = build_problem(distribution_cfg, common)
+    potential, potential_meta = build_problem(problem, common)
     g_mat = G_matrix(model)
 
     n_samples = int(common["N_samples"])
@@ -409,7 +673,7 @@ def run_single(
             potential=potential,
             initial_params=init_params,
             n_iterations=int(method_params.get("max_iterations", max_iterations)),
-            step_size=float(method_params.get("stepsize", stepsize)),
+            step_size=float(method_params.get("stepsize", common.get("stepsize", 1e-3))),
             solver=str(method_params.get("solver", "cg")),
             solver_tol=float(method_params.get("solver_tol", tolerance)),
             solver_maxiter=int(method_params.get("solver_maxiter", 50)),
@@ -448,7 +712,11 @@ def run_single(
     return {
         "method": method,
         "method_params": method_params,
-        "distribution": distribution_cfg,
+        "problem": problem,
+        "problem_key": problem_key(problem),
+        "problem_label": problem_label(problem),
+        "problem_slug": problem_slug(problem),
+        "functional_kind": problem["functional"]["kind"],
         "common": common,
         "model_config": model_cfg,
         "problem_meta": potential_meta,
@@ -479,8 +747,17 @@ def append_run_to_h5(path: Path, run_id: str, run: dict[str, Any]) -> None:
         if run_id in runs_grp:
             del runs_grp[run_id]
         grp = runs_grp.create_group(run_id)
+        run_problem = normalize_problem_entry(run["problem"])
+        run_problem_key = run.get("problem_key", problem_key(run_problem))
+        run_problem_label = run.get("problem_label", problem_label(run_problem))
+        run_problem_slug = run.get("problem_slug", problem_slug(run_problem))
         grp.attrs["method"] = run["method"]
-        grp.attrs["distribution"] = run["distribution"]["name"]
+        grp.attrs["problem_json"] = json.dumps(run_problem, sort_keys=True)
+        grp.attrs["problem_key"] = run_problem_key
+        grp.attrs["problem_label"] = run_problem_label
+        grp.attrs["problem_slug"] = run_problem_slug
+        grp.attrs["functional_kind"] = run_problem["functional"]["kind"]
+        grp.attrs["distribution"] = distribution_label(run_problem["distribution"])
         grp.attrs["method_params_json"] = json.dumps(
             run["method_params"], sort_keys=True
         )
@@ -518,26 +795,79 @@ def make_plot_config(
         config_for_plot["methods"] = dict(current_config.get("methods", {}))
     if "common_params" not in config_for_plot:
         config_for_plot["common_params"] = dict(current_config.get("common_params", {}))
-    if "distributions" not in config_for_plot:
-        config_for_plot["distributions"] = []
+    if "problems" not in config_for_plot:
+        if "distributions" in config_for_plot and isinstance(
+            config_for_plot["distributions"], list
+        ):
+            config_for_plot["problems"] = [
+                {
+                    "functional": {"kind": "KL"},
+                    "distribution": normalize_distribution_entry(dist_cfg),
+                }
+                for dist_cfg in config_for_plot["distributions"]
+            ]
+        else:
+            config_for_plot["problems"] = []
     return config_for_plot
 
 
 def load_runs_from_h5(path: Path) -> list[dict[str, Any]]:
+    def _load_problem_from_attrs(attrs: Any) -> dict[str, Any]:
+        if "problem_json" in attrs:
+            raw_problem_json = _attr_to_str(attrs.get("problem_json", "{}"), "{}")
+            loaded_problem = json.loads(raw_problem_json)
+            return normalize_problem_entry(loaded_problem)
+
+        # Backward-compatible path for legacy .h5 entries.
+        legacy_distribution = _attr_to_str(attrs.get("distribution", "unknown"), "unknown")
+        legacy_kind = normalize_functional_kind(
+            _attr_to_str(attrs.get("functional_kind", "KL"), "KL")
+        )
+        return {
+            "functional": {"kind": legacy_kind},
+            "distribution": {"name": legacy_distribution},
+        }
+
     with h5py.File(path, "r") as h5:
         out: list[dict[str, Any]] = []
         for run_id in sorted(h5["runs"].keys()):
             grp = h5["runs"][run_id]
+            loaded_problem = _load_problem_from_attrs(grp.attrs)
+            loaded_problem_key = _attr_to_str(
+                grp.attrs.get("problem_key", problem_key(loaded_problem)),
+                problem_key(loaded_problem),
+            )
+            loaded_problem_label = _attr_to_str(
+                grp.attrs.get("problem_label", problem_label(loaded_problem)),
+                problem_label(loaded_problem),
+            )
+            loaded_problem_slug = _attr_to_str(
+                grp.attrs.get("problem_slug", problem_slug(loaded_problem)),
+                problem_slug(loaded_problem),
+            )
             out.append(
                 {
                     "run_id": run_id,
-                    "method": str(grp.attrs["method"]),
-                    "distribution": str(grp.attrs["distribution"]),
-                    "method_params": json.loads(str(grp.attrs["method_params_json"])),
-                    "model_config": json.loads(str(grp.attrs["model_config_json"])),
-                    "common": json.loads(str(grp.attrs["common_json"])),
+                    "method": _attr_to_str(grp.attrs.get("method", ""), ""),
+                    "problem": loaded_problem,
+                    "problem_key": loaded_problem_key,
+                    "problem_label": loaded_problem_label,
+                    "problem_slug": loaded_problem_slug,
+                    "functional_kind": loaded_problem["functional"]["kind"],
+                    "method_params": json.loads(
+                        _attr_to_str(grp.attrs.get("method_params_json", "{}"), "{}")
+                    ),
+                    "model_config": json.loads(
+                        _attr_to_str(grp.attrs.get("model_config_json", "{}"), "{}")
+                    ),
+                    "common": json.loads(
+                        _attr_to_str(grp.attrs.get("common_json", "{}"), "{}")
+                    ),
                     "runtime_sec": float(grp.attrs["runtime_sec"]),
-                    "model_ckpt_relpath": str(grp.attrs["model_ckpt_relpath"]),
+                    "model_ckpt_relpath": _attr_to_str(
+                        grp.attrs.get("model_ckpt_relpath", ""),
+                        "",
+                    ),
                     "energy_history": np.asarray(
                         grp["energy_history"][:], dtype=np.float64
                     ),
@@ -901,31 +1231,74 @@ def save_live_convergence_plot(
     plt.close(fig)
 
 
+def target_scatter_style(plotting_cfg: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "size": float(plotting_cfg.get("target_scatter_size", 6.0)),
+        "alpha": float(plotting_cfg.get("target_scatter_alpha", 0.9)),
+        "marker": str(plotting_cfg.get("target_scatter_marker", "*")),
+        "facecolors": plotting_cfg.get("target_scatter_facecolors", "none"),
+        "edgecolors": plotting_cfg.get("target_scatter_edgecolors", "#111111"),
+        "linewidths": float(plotting_cfg.get("target_scatter_linewidths", 0.6)),
+        "zorder": int(plotting_cfg.get("target_scatter_zorder", 5)),
+        "label": str(plotting_cfg.get("target_scatter_label", "target")),
+    }
+
+
 def save_live_scatter_plot(
     scatter_samples: np.ndarray,
     distribution_cfg: dict[str, Any],
     plotting_cfg: dict[str, Any],
     out_path: Path,
     title: str,
+    target_samples: np.ndarray | None = None,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=tuple(plotting_cfg.get("scatter_figsize", [8, 8])))
 
     x = scatter_samples[:, 0]
     y = scatter_samples[:, 1]
+    model_label = "model" if target_samples is not None else None
     ax.scatter(
         x,
         y,
         s=float(plotting_cfg.get("scatter_size", 20)),
         alpha=float(plotting_cfg.get("method_alpha", 0.55)),
         color=plotting_cfg.get("diagnostic_color", "#444444"),
+        label=model_label,
     )
+
+    target_samples_2d: np.ndarray | None = None
+    if target_samples is not None:
+        target = np.asarray(target_samples)
+        if target.ndim == 2 and target.shape[1] >= 2:
+            tstyle = target_scatter_style(plotting_cfg)
+            target_label = tstyle.pop("label")
+            ax.scatter(
+                target[:, 0],
+                target[:, 1],
+                s=tstyle["size"],
+                alpha=tstyle["alpha"],
+                marker=tstyle["marker"],
+                facecolors=tstyle["facecolors"],
+                edgecolors=tstyle["edgecolors"],
+                linewidths=tstyle["linewidths"],
+                zorder=tstyle["zorder"],
+                label=target_label,
+            )
+            target_samples_2d = target[:, :2]
+            ax.legend(loc="upper right", frameon=True)
 
     try:
         plot_pot = build_plot_potential_2d(distribution_cfg)
         if plot_pot is not None:
-            low = np.min(scatter_samples[:, :2], axis=0)
-            high = np.max(scatter_samples[:, :2], axis=0)
+            if target_samples_2d is not None:
+                bounds_joint = np.concatenate(
+                    [scatter_samples[:, :2], target_samples_2d], axis=0
+                )
+            else:
+                bounds_joint = scatter_samples[:, :2]
+            low = np.min(bounds_joint, axis=0)
+            high = np.max(bounds_joint, axis=0)
             margin = 0.2 * np.maximum(high - low, 1e-3)
             x_bds = jnp.array([low[0] - margin[0], high[0] + margin[0]])
             y_bds = jnp.array([low[1] - margin[1], high[1] + margin[1]])
@@ -956,13 +1329,18 @@ def save_convergence_plots(
     runs: list[dict[str, Any]],
     output_dir: Path,
 ) -> None:
-    plotting_cfg : dict = config.get("plotting", {})
-    distributions = sorted({run["distribution"] for run in runs})
-    guess_min = plotting_cfg.get('guess_min', False)
-    for distribution in distributions:
-        dist_runs = [run for run in runs if run["distribution"] == distribution]
+    plotting_cfg: dict[str, Any] = config.get("plotting", {})
+    problem_keys = sorted({run["problem_key"] for run in runs})
+    guess_min = plotting_cfg.get("guess_min", False)
+    for key in problem_keys:
+        problem_runs = [run for run in runs if run["problem_key"] == key]
+        if not problem_runs:
+            continue
+        current_problem_label = problem_runs[0]["problem_label"]
+        current_problem_slug = problem_runs[0]["problem_slug"]
+
         method_runs_map: dict[str, list[dict[str, Any]]] = {}
-        for run in dist_runs:
+        for run in problem_runs:
             method_runs_map.setdefault(run["method"], []).append(run)
         style_plan_map: dict[str, tuple[list[str], dict[str, dict[str, Any]]]] = {
             method: build_method_style_plan(config, plotting_cfg, method, method_runs)
@@ -974,12 +1352,12 @@ def save_convergence_plots(
         )
 
         if guess_min:
-            e_min = min(jnp.min(run["energy_history"]) for run in dist_runs) - 1e-6
+            e_min = min(jnp.min(run["energy_history"]) for run in problem_runs) - 1e-6
         else:
-            e_min = 0.
+            e_min = 0.0
 
         used_labels: dict[str, int] = {}
-        for run in dist_runs:
+        for run in problem_runs:
             m = run["method"]
             varying_keys, channel_value_maps = style_plan_map[m]
             style = style_for_run(run["method_params"], channel_value_maps)
@@ -1001,11 +1379,11 @@ def save_convergence_plots(
             )
 
         if guess_min:
-            axes[0].set_yscale('log')
-        axes[1].set_yscale('log')
+            axes[0].set_yscale("log")
+        axes[1].set_yscale("log")
 
-        axes[0].set_title(f"Energy history ({distribution})")
-        axes[1].set_title(f"Riemannian gradient history ({distribution})")
+        axes[0].set_title(f"Energy history ({current_problem_label})")
+        axes[1].set_title(f"Riemannian gradient history ({current_problem_label})")
         axes[0].set_xlabel("iteration")
         axes[1].set_xlabel("iteration")
         axes[0].set_ylabel("energy")
@@ -1024,8 +1402,10 @@ def save_convergence_plots(
         )
         fig.tight_layout()
         fig.subplots_adjust(bottom=bottom)
-        dist_slug = sanitize_component(distribution)
-        out = output_dir / f"run_all__{dist_slug}__all_methods__convergence.pdf"
+        out = (
+            output_dir
+            / f"run_all__{sanitize_component(current_problem_slug)}__all_methods__convergence.pdf"
+        )
         fig.savefig(out)
         plt.close(fig)
 
@@ -1072,13 +1452,6 @@ def generate_samples(
     return np.asarray(x)
 
 
-def get_dist_cfg(config: dict[str, Any], name: str) -> dict[str, Any]:
-    for entry in distribution_grid(config["distributions"]):
-        if entry["name"] == name:
-            return entry
-    raise ValueError(f"Distribution config not found for {name}")
-
-
 def save_scatter_plots(
     config: dict[str, Any],
     runs: list[dict[str, Any]],
@@ -1089,12 +1462,21 @@ def save_scatter_plots(
     common = config["common_params"]
     dim = int(common["dimension"])
     n_samples = int(common.get("plot_n_samples", 300))
-    distributions = sorted({run["distribution"] for run in runs})
+    problem_keys = sorted({run["problem_key"] for run in runs})
 
-    for distribution in distributions:
-        dist_runs = [run for run in runs if run["distribution"] == distribution]
+    for key in problem_keys:
+        problem_runs = [run for run in runs if run["problem_key"] == key]
+        if not problem_runs:
+            continue
+        current_problem_label = problem_runs[0]["problem_label"]
+        current_problem_slug = problem_runs[0]["problem_slug"]
+        distribution_cfg = dict(problem_runs[0]["problem"]["distribution"])
+        target_generator = None
+        if problem_runs[0]["functional_kind"] in {"MMD", "CrossEntropy"}:
+            target_generator = build_target_generator(distribution_cfg, common)
+
         method_runs_map: dict[str, list[dict[str, Any]]] = {}
-        for run in dist_runs:
+        for run in problem_runs:
             method_runs_map.setdefault(run["method"], []).append(run)
         style_plan_map: dict[str, tuple[list[str], dict[str, dict[str, Any]]]] = {
             method: build_method_style_plan(config, plotting_cfg, method, method_runs)
@@ -1102,9 +1484,11 @@ def save_scatter_plots(
         }
         warned_scatter_kwargs: set[tuple[str, str]] = set()
 
-        gf_runs = [run for run in dist_runs if run["method"] == "gradient_flow"]
+        gf_runs = [run for run in problem_runs if run["method"] == "gradient_flow"]
         if not gf_runs:
-            print(f"[warn] skip scatter for {distribution}: no gradient_flow run")
+            print(
+                f"[warn] skip scatter for {current_problem_label}: no gradient_flow run"
+            )
             continue
         gf_baseline = gf_runs[0]
         gf_varying_keys, gf_channel_maps = style_plan_map["gradient_flow"]
@@ -1118,10 +1502,14 @@ def save_scatter_plots(
         gf_samples = generate_samples(gf_model, dim, n_samples, seed=123)
 
         methods = sorted(
-            {run["method"] for run in dist_runs if run["method"] != "gradient_flow"}
+            {
+                run["method"]
+                for run in problem_runs
+                if run["method"] != "gradient_flow"
+            }
         )
         for method in methods:
-            method_runs = [run for run in dist_runs if run["method"] == method]
+            method_runs = [run for run in problem_runs if run["method"] == method]
             if not method_runs:
                 continue
 
@@ -1130,6 +1518,26 @@ def save_scatter_plots(
             )
             method_varying_keys, method_channel_maps = style_plan_map[method]
             used_labels: dict[str, int] = {}
+            target_samples_2d: np.ndarray | None = None
+
+            if target_generator is not None:
+                target_samples = np.asarray(next(target_generator))
+                if target_samples.ndim == 2 and target_samples.shape[1] >= 2:
+                    target_samples_2d = target_samples[:, :2]
+                    tstyle = target_scatter_style(plotting_cfg)
+                    target_label = tstyle.pop("label")
+                    ax.scatter(
+                        target_samples[:, 0],
+                        target_samples[:, 1],
+                        s=tstyle["size"],
+                        alpha=tstyle["alpha"],
+                        marker=tstyle["marker"],
+                        facecolors=tstyle["facecolors"],
+                        edgecolors=tstyle["edgecolors"],
+                        linewidths=tstyle["linewidths"],
+                        zorder=tstyle["zorder"],
+                        label=target_label,
+                    )
 
             gf_label = build_method_label_latex(
                 "gradient_flow", gf_baseline["method_params"], gf_varying_keys
@@ -1173,13 +1581,14 @@ def save_scatter_plots(
                 )
 
             try:
-                dist_cfg = get_dist_cfg(config, distribution)
-                plot_pot = build_plot_potential_2d(dist_cfg)
+                plot_pot = build_plot_potential_2d(distribution_cfg)
                 if plot_pot is not None:
-                    joint = np.concatenate(
-                        [gf_samples[:, :2]] + [s[:, :2] for s in all_method_samples],
-                        axis=0,
-                    )
+                    joint_parts = [gf_samples[:, :2]] + [
+                        s[:, :2] for s in all_method_samples
+                    ]
+                    if target_samples_2d is not None:
+                        joint_parts.append(target_samples_2d)
+                    joint = np.concatenate(joint_parts, axis=0)
                     low = np.min(joint, axis=0)
                     high = np.max(joint, axis=0)
                     margin = 0.2 * np.maximum(high - low, 1e-3)
@@ -1195,9 +1604,12 @@ def save_scatter_plots(
                         alpha=0.5,
                     )
             except Exception as exc:
-                print(f"[warn] failed contour plot for {distribution}/{method}: {exc}")
+                print(
+                    "[warn] failed contour plot for "
+                    f"{current_problem_label}/{method}: {exc}"
+                )
 
-            ax.set_title(f"{distribution}: gradient_flow vs {method}")
+            ax.set_title(f"{current_problem_label}: gradient_flow vs {method}")
             ax.set_xlabel("x[0]")
             ax.set_ylabel("x[1]")
             ax.grid(True)
@@ -1213,9 +1625,11 @@ def save_scatter_plots(
             )
             fig.tight_layout()
             fig.subplots_adjust(bottom=bottom)
-            dist_slug = sanitize_component(distribution)
             method_slug = sanitize_component(method)
-            out = output_dir / f"run_all__{dist_slug}__{method_slug}__scatter.pdf"
+            out = (
+                output_dir
+                / f"run_all__{sanitize_component(current_problem_slug)}__{method_slug}__scatter.pdf"
+            )
             fig.savefig(out)
             plt.close(fig)
 
@@ -1240,11 +1654,12 @@ def _get_live_plot_every(common: dict[str, Any]) -> int | None:
 
 def _prepare_planned_runs(config: dict[str, Any]) -> list[dict[str, Any]]:
     common = config["common_params"]
-    dist_cfgs = distribution_grid(config["distributions"])
+    configured_problems = problem_grid(config["problems"])
     base_seed = int(common.get("seed", 0))
 
     varying_keys_lookup: dict[tuple[str, str], list[str]] = {}
-    for dist in dist_cfgs:
+    for problem in configured_problems:
+        key = problem_key(problem)
         for method, m_cfg in config["methods"].items():
             candidate_runs: list[dict[str, Any]] = []
             for params in method_grid(m_cfg):
@@ -1253,41 +1668,43 @@ def _prepare_planned_runs(config: dict[str, Any]) -> list[dict[str, Any]]:
                 p.setdefault("max_iterations", common.get("max_iterations", 300))
                 p.setdefault("tolerance", common.get("tolerance", 1e-4))
                 candidate_runs.append({"method_params": p})
-            varying_keys_lookup[(dist["name"], method)] = get_varying_keys_in_order(
+            varying_keys_lookup[(key, method)] = get_varying_keys_in_order(
                 candidate_runs, list(m_cfg.keys())
             )
 
     planned_runs: list[dict[str, Any]] = []
     run_counter = 0
-    for dist in dist_cfgs:
+    for problem in configured_problems:
+        key = problem_key(problem)
+        run_problem_label = problem_label(problem)
+        run_problem_slug = problem_slug(problem)
         for method, m_cfg in config["methods"].items():
             for params in method_grid(m_cfg):
                 p = dict(params)
                 p.setdefault("stepsize", common.get("stepsize", 1e-4))
                 p.setdefault("max_iterations", common.get("max_iterations", 300))
                 p.setdefault("tolerance", common.get("tolerance", 1e-4))
-                dist_slug = sanitize_component(dist["name"])
                 method_slug = sanitize_component(method)
-                run_id = f"{dist_slug}__{method_slug}__run_{run_counter:04d}"
-                run_name = f"{dist['name']} | {method} | {run_id}"
+                run_id = f"{run_problem_slug}__{method_slug}__run_{run_counter:04d}"
+                run_name = f"{run_problem_label} | {method} | {run_id}"
                 run_method_label = build_method_label_latex(
                     method,
                     p,
-                    varying_keys_lookup[(dist["name"], method)],
+                    varying_keys_lookup[(key, method)],
                 )
                 planned_runs.append(
                     {
                         "run_index": run_counter,
                         "run_id": run_id,
                         "run_name": run_name,
-                        "run_title_base": f"{dist['name']} ",
+                        "run_title_base": run_problem_label,
                         "run_method_label": run_method_label,
                         "inner_total": int(
                             p.get("max_iterations", common.get("max_iterations", 300))
                         ),
                         "method": method,
                         "params": p,
-                        "distribution": dist,
+                        "problem": problem,
                         "run_seed": base_seed + run_counter,
                     }
                 )
@@ -1309,7 +1726,11 @@ def _execute_planned_run(
     run_id = str(planned_run["run_id"])
     method = str(planned_run["method"])
     params = dict(planned_run["params"])
-    dist = dict(planned_run["distribution"])
+    problem = normalize_problem_entry(planned_run["problem"])
+    dist = dict(problem["distribution"])
+    target_generator = None
+    if problem["functional"]["kind"] in {"MMD", "CrossEntropy"}:
+        target_generator = build_target_generator(problem["distribution"], common)
 
     diagnostic_root = benchmark_dir / "diagnostic_plots"
     live_convergence_path = diagnostic_root / f"run_{run_id}__convergence.pdf"
@@ -1364,12 +1785,16 @@ def _execute_planned_run(
         )
         if int(common["dimension"]) >= 2:
             if latest_scatter_samples is not None:
+                target_samples = None
+                if target_generator is not None:
+                    target_samples = np.asarray(next(target_generator))
                 save_live_scatter_plot(
                     latest_scatter_samples,
                     dist,
                     plotting_cfg,
                     live_scatter_path,
                     title=diag_title,
+                    target_samples=target_samples,
                 )
         elif not warned_1d_scatter:
             if print_warnings:
@@ -1381,7 +1806,7 @@ def _execute_planned_run(
     run = run_single(
         method=method,
         method_params=params,
-        distribution_cfg=dist,
+        problem_cfg=problem,
         common=common,
         run_seed=int(planned_run["run_seed"]),
         checkpoint_root=benchmark_dir,
@@ -1404,12 +1829,16 @@ def _execute_planned_run(
             title=final_title,
         )
         if int(common["dimension"]) >= 2 and latest_scatter_samples is not None:
+            target_samples = None
+            if target_generator is not None:
+                target_samples = np.asarray(next(target_generator))
             save_live_scatter_plot(
                 latest_scatter_samples,
                 dist,
                 plotting_cfg,
                 live_scatter_path,
                 title=final_title,
+                target_samples=target_samples,
             )
 
     return run, final_iter

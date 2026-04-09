@@ -2,7 +2,7 @@
   "output_root": "results/db_anderson",
   "common_params": {
     "seed": 0,
-    "dimension": 50,
+    "dimension": 2,
     "n_hidden": 2,
     "width_hidden": 32,
     "parametric_map": "node",
@@ -13,27 +13,32 @@
     "dt0": 0.1,
     "ref_density": "gaussian",
     "scale_factor": 0.1,
-    "stepsize": 0.001,
+    "stepsize": 5e-2,
     "N_samples": 3000,
     "eval_samples": 100,
     "plot_n_samples": 100,
-    "max_iterations": 2000,
+    "max_iterations": 3000,
     "tolerance": 0.0001,
     "linear_solver": "cg",
     "live_plot_every": 100
   },  
-  "distributions": [
+  "problems": [
     {
-      "name": "double-banana",
-      "shift": [0.0, 10.0]
+      "functional": {
+        "kind": "KL"
+      },
+      "distribution": {
+        "name": "double-banana",
+        "shift": [0.0, 10.0]
+      }
     }
   ],
   "methods": {
     "gradient_flow": {
     },
     "anderson": {
-      "relaxation": [1.00, 1.25],
-      "regularization": [1e-1, 1e-3],
+      "relaxation": [0.9, 1.00, 1.25, 1.8],
+      "regularization": [1e-1, 1e-3, 1e-5],
       "regularization_kind": ["l2", "adaptive"],
       "solver": ["cg"],
       "memory_size": [8],
@@ -54,6 +59,14 @@
     "style_values": {
       "linestyle": ["-", "--", ":", "-.", "-"],
       "linewidth": [1.5, 3.0]
-    }
+    },
+    "target_scatter_size": 6.0,
+    "target_scatter_alpha": 0.9,
+    "target_scatter_marker": "*",
+    "target_scatter_facecolors": "none",
+    "target_scatter_edgecolors": "#111111",
+    "target_scatter_linewidths": 0.6,
+    "target_scatter_zorder": 5,
+    "target_scatter_label": "target"
   }
 }

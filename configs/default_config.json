@@ -19,12 +19,17 @@
     "plot_n_samples": 100,
     "max_iterations": 100
   },
-  "distributions": [
+  "problems": [
     {
-      "name": "gaussian",
-      "mean_value": 2.0,
-      "sigma_first": 1000.0,
-      "sigma_second": 10.0
+      "functional": {
+        "kind": "KL"
+      },
+      "distribution": {
+        "name": "gaussian",
+        "mean_value": 2.0,
+        "sigma_first": 1000.0,
+        "sigma_second": 10.0
+      }
     }
   ],
   "methods": {
@@ -56,6 +61,14 @@
     },
     "scatter_size": 22,
     "gf_alpha": 0.45,
-    "method_alpha": 0.55
+    "method_alpha": 0.55,
+    "target_scatter_size": 6.0,
+    "target_scatter_alpha": 0.9,
+    "target_scatter_marker": "*",
+    "target_scatter_facecolors": "none",
+    "target_scatter_edgecolors": "#111111",
+    "target_scatter_linewidths": 0.6,
+    "target_scatter_zorder": 5,
+    "target_scatter_label": "target"
   }
 }

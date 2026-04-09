@@ -22,13 +22,18 @@
     "linear_solver": "cg",
     "live_plot_every": 100
   },  
-  "distributions": [
+  "problems": [
     {
-      "name": "gaussian",
-      "mean_value": 2.0,
-      "sigma_max": 100.0,
-      "sigma_min": 1.0,
-      "orth_seed": 1
+      "functional": {
+        "kind": "KL"
+      },
+      "distribution": {
+        "name": "gaussian",
+        "mean_value": 2.0,
+        "sigma_max": 100.0,
+        "sigma_min": 1.0,
+        "orth_seed": 1
+      }
     }
   ],
   "methods": {
@@ -36,7 +41,7 @@
     },
     "anderson": {
       "relaxation": [1.00, 1.25],
-      "regularization": [1e-1, 1e-3],
+      "regularization": [1e-1, 1e-3, 1e-6],
       "regularization_kind": ["l2", "adaptive"],
       "solver": ["cg"],
       "memory_size": [8],
@@ -48,7 +53,6 @@
     "plotting": {
     "figsize": [17, 6],
     "scatter_figsize": [8, 8],
-    "guess_min": true,
     "method_colormaps": {
       "gradient_flow": "Greens",
       "anderson": "coolwarm"
@@ -57,6 +61,14 @@
     "style_values": {
       "linestyle": ["-", "--", ":", "-.", "-"],
       "linewidth": [1.5, 3.0]
-    }
+    },
+    "target_scatter_size": 6.0,
+    "target_scatter_alpha": 0.9,
+    "target_scatter_marker": "*",
+    "target_scatter_facecolors": "none",
+    "target_scatter_edgecolors": "#111111",
+    "target_scatter_linewidths": 0.6,
+    "target_scatter_zorder": 5,
+    "target_scatter_label": "target"
   }
 }
