@@ -2,6 +2,8 @@
 import os
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["SCIPY_ARRAY_API"] = "1"
+from scipy.optimize import rosen
 
 import argparse
 import gc
@@ -362,6 +364,8 @@ def _build_kl_problem(
         def potential_fn(x: jnp.ndarray) -> jnp.ndarray:
             return styblinski_tang_potential_fn(x, d=dim)
 
+    elif dist_name in {"rosen", "Rosenbrock"}:
+        potential_fn = lambda _x: rosen(_x.T) / 20.0
     else:
         raise ValueError(f"Unknown distribution: {distribution_cfg['name']}")
 
@@ -413,8 +417,8 @@ def two_spirals_generator(n_samples: int, resample_each: int, seed: int = 3):
 
 
 def eight_gaussians_generator(n_samples: int, resample_each: int, seed: int = 3):
-    theta = jnp.linspace(0., 2.*jnp.pi, 8)
-    centers = 4.*jnp.stack((jnp.cos(theta), jnp.sin(theta)) , axis=-1)
+    theta = jnp.linspace(0.0, 2.0 * jnp.pi, 8)
+    centers = 4.0 * jnp.stack((jnp.cos(theta), jnp.sin(theta)), axis=-1)
     key = jax.random.PRNGKey(seed)
 
     while True:
@@ -427,8 +431,6 @@ def eight_gaussians_generator(n_samples: int, resample_each: int, seed: int = 3)
 
         for _ in range(resample_each):
             yield x
-    
-
 
 
 def file_dataset_generator_stub(file_path: str, n_samples: int, resample_each: int):
@@ -571,6 +573,10 @@ def build_plot_potential_2d(distribution_cfg: dict[str, Any]) -> LinearPotential
             return styblinski_tang_potential_fn(x, d=2)
 
         return LinearPotential(potential_fn=fn, coeff=1.0)
+
+    elif _name in {"rosen", "Rosenbrock"}:
+        potential_fn = lambda _x: rosen(_x.T) / 20.0
+        return LinearPotential(potential_fn=potential_fn, coef=1.0)
 
     return None
 
