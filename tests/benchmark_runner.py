@@ -41,6 +41,7 @@ sys.path.append(str(root_path))
 from flows.anderson_acceleration import anderson_method
 from flows.gradient_flow import run_gradient_flow
 from flows.memoryless_qn import memoryless_qn_method
+from flows.nnx_first_order import run_adam, run_sgd
 from functionals.CrossEntropy import CrossEntropyEnergy
 from functionals.MMD import MMDEnergy, bandwidth_median
 from functionals.functional import Potential
@@ -60,6 +61,8 @@ METHOD_ALIASES = {
     "memoryless_qn": "memoryless_qn",
     "memoryless-qn": "memoryless_qn",
     "mqn": "memoryless_qn",
+    "sgd": "sgd",
+    "adam": "adam",
 }
 
 
@@ -202,7 +205,13 @@ def load_config(config_path: Path) -> dict[str, Any]:
     normalized_methods = {}
     for raw_name, method_cfg in config["methods"].items():
         canonical = METHOD_ALIASES.get(raw_name, raw_name)
-        if canonical not in {"gradient_flow", "anderson", "memoryless_qn"}:
+        if canonical not in {
+            "gradient_flow",
+            "anderson",
+            "memoryless_qn",
+            "sgd",
+            "adam",
+        }:
             raise ValueError(f"Unknown method in config: {raw_name}")
         normalized_methods[canonical] = method_cfg or {}
     config["methods"] = normalized_methods
@@ -604,6 +613,29 @@ def save_model_checkpoint(final_model: ParametricModel, ckpt_dir: Path) -> None:
     checkpointer.save(abspath, state, save_args=save_args)
 
 
+FIRST_ORDER_CONTROL_KEYS = {
+    "stepsize",
+    "max_iterations",
+    "tolerance",
+    "progress_every",
+    "verbose",
+    "use_tqdm",
+}
+
+
+def extract_first_order_optimizer_kwargs(method_params: dict[str, Any]) -> dict[str, Any]:
+    optimizer_kwargs = {
+        key: value
+        for key, value in method_params.items()
+        if key not in FIRST_ORDER_CONTROL_KEYS
+    }
+    if "learning_rate" in optimizer_kwargs:
+        raise ValueError(
+            "Use 'stepsize' in benchmark config; it is mapped to optimizer learning_rate"
+        )
+    return optimizer_kwargs
+
+
 def run_single(
     method: str,
     method_params: dict[str, Any],
@@ -629,6 +661,7 @@ def run_single(
     )
 
     t0 = time.perf_counter()
+    euclid_grad = np.asarray([], dtype=np.float64)
 
     if method == "gradient_flow":
         history = run_gradient_flow(
@@ -738,6 +771,37 @@ def run_single(
         final_model = nnx.merge(graphdef, final_params)
         energies = np.asarray(history["energies"], dtype=np.float64)
         riem_grad = np.asarray(history["riemann_grad_history"], dtype=np.float64)
+
+    elif method in {"sgd", "adam"}:
+        first_order_kwargs = extract_first_order_optimizer_kwargs(method_params)
+        first_order_common_kwargs = {
+            "parametric_model": model,
+            "batch_size": n_samples,
+            "test_data_set": z_samples,
+            "potential": potential,
+            "n_iterations": int(method_params.get("max_iterations", max_iterations)),
+            "learning_rate": float(
+                method_params.get("stepsize", common.get("stepsize", 1e-3))
+            ),
+            "convergence_tol": float(method_params.get("tolerance", tolerance)),
+            "progress_every": int(
+                method_params.get("progress_every", common.get("progress_every", 100))
+            ),
+            "verbose": bool(method_params.get("verbose", False)),
+            "use_tqdm": bool(method_params.get("use_tqdm", False)),
+            "progress_callback": progress_callback,
+            "diagnostic_sample_size": diagnostic_sample_size,
+            **first_order_kwargs,
+        }
+        if method == "sgd":
+            history = run_sgd(**first_order_common_kwargs)
+        else:
+            history = run_adam(**first_order_common_kwargs)
+
+        final_model = history["final_parametric_model"]
+        energies = np.asarray(history["energy_history"], dtype=np.float64)
+        riem_grad = np.asarray([], dtype=np.float64)
+        euclid_grad = np.asarray(history["euclidean_grad_history"], dtype=np.float64)
     else:
         raise ValueError(f"Unsupported method: {method}")
 
@@ -759,6 +823,7 @@ def run_single(
         "problem_meta": potential_meta,
         "energy_history": energies,
         "riemann_grad_history": riem_grad,
+        "euclidean_grad_history": euclid_grad,
         "runtime_sec": runtime_sec,
         "model_ckpt_relpath": str(ckpt_relpath),
     }
@@ -804,6 +869,10 @@ def append_run_to_h5(path: Path, run_id: str, run: dict[str, Any]) -> None:
         grp.attrs["model_ckpt_relpath"] = run["model_ckpt_relpath"]
         grp.create_dataset("energy_history", data=run["energy_history"])
         grp.create_dataset("riemann_grad_history", data=run["riemann_grad_history"])
+        grp.create_dataset(
+            "euclidean_grad_history",
+            data=np.asarray(run.get("euclidean_grad_history", []), dtype=np.float64),
+        )
         h5.attrs["run_count"] = int(h5.attrs.get("run_count", 0)) + 1
         h5.flush()
 
@@ -913,6 +982,11 @@ def load_runs_from_h5(path: Path) -> list[dict[str, Any]]:
                     "riemann_grad_history": np.asarray(
                         grp["riemann_grad_history"][:], dtype=np.float64
                     ),
+                    "euclidean_grad_history": np.asarray(
+                        grp["euclidean_grad_history"][:], dtype=np.float64
+                    )
+                    if "euclidean_grad_history" in grp
+                    else np.asarray([], dtype=np.float64),
                 }
             )
     return out
@@ -932,6 +1006,12 @@ KEY_LABELS = {
     "solver_tol": r"\mathrm{ST}",
     "anderson_tol": r"\mathrm{AT}",
     "max_iterations": r"\mathrm{MI}",
+    "momentum": r"\mu",
+    "nesterov": r"\mathrm{Nes}",
+    "b1": r"\beta_1",
+    "b2": r"\beta_2",
+    "eps": r"\epsilon",
+    "eps_root": r"\epsilon_{\mathrm{root}}",
 }
 
 VALUE_LABELS = {
@@ -1238,9 +1318,10 @@ def dynamic_legend_layout(labels: list[str], fig_width: float) -> tuple[int, flo
 
 def save_live_convergence_plot(
     energy_history: list[float],
-    riemann_grad_history: list[float],
+    grad_history: list[float],
     out_path: Path,
     title: str,
+    grad_label: str = "Riemannian gradient norm",
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
@@ -1250,14 +1331,14 @@ def save_live_convergence_plot(
         axes[0].plot(e, color="#1f77b4", linewidth=1.8)
         if np.all(e > 0):
             axes[0].set_yscale("log")
-    if riemann_grad_history:
-        g = np.asarray(riemann_grad_history, dtype=np.float64)
+    if grad_history:
+        g = np.asarray(grad_history, dtype=np.float64)
         axes[1].plot(g, color="#d62728", linewidth=1.8)
         if np.all(g > 0):
             axes[1].set_yscale("log")
 
     axes[0].set_title("Energy")
-    axes[1].set_title("Riemannian gradient norm")
+    axes[1].set_title(grad_label)
     axes[0].set_xlabel("iteration")
     axes[1].set_xlabel("iteration")
     axes[0].set_ylabel("energy")
@@ -1389,6 +1470,12 @@ def save_convergence_plots(
         fig, axes = plt.subplots(
             1, 2, figsize=tuple(plotting_cfg.get("figsize", [16, 6]))
         )
+        euclidean_axis = None
+        if any(
+            np.asarray(run.get("euclidean_grad_history", []), dtype=np.float64).size > 0
+            for run in problem_runs
+        ):
+            euclidean_axis = axes[1].twinx()
 
         if guess_min:
             e_min = min(jnp.min(run["energy_history"]) for run in problem_runs) - 1e-6
@@ -1411,29 +1498,79 @@ def save_convergence_plots(
                 label=label,
                 **style,
             )
-            axes[1].plot(
-                run["riemann_grad_history"],
-                label=label,
-                **style,
-            )
+            riemann_history = np.asarray(run["riemann_grad_history"], dtype=np.float64)
+            if riemann_history.size > 0:
+                axes[1].plot(
+                    riemann_history,
+                    label=label,
+                    **style,
+                )
+            if euclidean_axis is not None:
+                euclidean_history = np.asarray(
+                    run.get("euclidean_grad_history", []), dtype=np.float64
+                )
+                if euclidean_history.size > 0:
+                    euclidean_axis.plot(
+                        euclidean_history,
+                        label=label,
+                        **style,
+                    )
 
         if guess_min:
             axes[0].set_yscale("log")
-        axes[1].set_yscale("log")
+        riemann_histories = [
+            np.asarray(run["riemann_grad_history"], dtype=np.float64)
+            for run in problem_runs
+            if np.asarray(run["riemann_grad_history"], dtype=np.float64).size > 0
+        ]
+        if riemann_histories and all(np.all(hist > 0) for hist in riemann_histories):
+            axes[1].set_yscale("log")
+        if euclidean_axis is not None:
+            euclidean_histories = [
+                np.asarray(run.get("euclidean_grad_history", []), dtype=np.float64)
+                for run in problem_runs
+                if np.asarray(run.get("euclidean_grad_history", []), dtype=np.float64).size
+                > 0
+            ]
+            if euclidean_histories and all(
+                np.all(hist > 0) for hist in euclidean_histories
+            ):
+                euclidean_axis.set_yscale("log")
 
         axes[0].set_title(f"Energy history ({current_problem_label})")
-        axes[1].set_title(f"Riemannian gradient history ({current_problem_label})")
+        if euclidean_axis is None:
+            axes[1].set_title(f"Riemannian gradient history ({current_problem_label})")
+        else:
+            axes[1].set_title(f"Gradient history ({current_problem_label})")
         axes[0].set_xlabel("iteration")
         axes[1].set_xlabel("iteration")
         axes[0].set_ylabel("energy")
         axes[1].set_ylabel("riemann grad norm")
+        if euclidean_axis is not None:
+            euclidean_axis.set_ylabel("euclidean grad norm")
+            euclidean_axis.grid(False)
         axes[0].grid(True)
         axes[1].grid(True)
         handles, labels = axes[1].get_legend_handles_labels()
-        ncol, bottom = dynamic_legend_layout(labels, fig.get_size_inches()[0])
+        if euclidean_axis is not None:
+            euclid_handles, euclid_labels = euclidean_axis.get_legend_handles_labels()
+            handles.extend(euclid_handles)
+            labels.extend(euclid_labels)
+
+        dedup_handles: list[Any] = []
+        dedup_labels: list[str] = []
+        seen_labels: set[str] = set()
+        for handle, label in zip(handles, labels, strict=False):
+            if label in seen_labels:
+                continue
+            seen_labels.add(label)
+            dedup_handles.append(handle)
+            dedup_labels.append(label)
+
+        ncol, bottom = dynamic_legend_layout(dedup_labels, fig.get_size_inches()[0])
         fig.legend(
-            handles,
-            labels,
+            dedup_handles,
+            dedup_labels,
             loc="lower center",
             bbox_to_anchor=(0.5, 0.0),
             ncol=ncol,
@@ -1791,15 +1928,21 @@ def _execute_planned_run(
 
     live_energy: list[float] = []
     live_grad: list[float] = []
+    live_grad_label = "Riemannian gradient norm"
     latest_scatter_samples: np.ndarray | None = None
     warned_1d_scatter = False
 
     def on_progress(info: dict[str, Any]) -> None:
-        nonlocal latest_scatter_samples, warned_1d_scatter
+        nonlocal latest_scatter_samples, warned_1d_scatter, live_grad_label
 
         iteration = int(info.get("iteration", 0)) + 1
         energy = float(info.get("energy", np.nan))
-        grad = float(info.get("riemann_grad_norm", np.nan))
+        if "euclidean_grad_norm" in info:
+            grad = float(info.get("euclidean_grad_norm", np.nan))
+            live_grad_label = "Euclidean gradient norm"
+        else:
+            grad = float(info.get("riemann_grad_norm", np.nan))
+            live_grad_label = "Riemannian gradient norm"
 
         if np.isfinite(energy):
             live_energy.append(energy)
@@ -1835,6 +1978,7 @@ def _execute_planned_run(
             live_grad,
             live_convergence_path,
             title=diag_title,
+            grad_label=live_grad_label,
         )
         if int(common["dimension"]) >= 2:
             if latest_scatter_samples is not None:
@@ -1875,11 +2019,21 @@ def _execute_planned_run(
             + "\n"
             + planned_run["run_method_label"]
         )
+        final_euclidean_grad = np.asarray(
+            run.get("euclidean_grad_history", []), dtype=np.float64
+        )
+        if final_euclidean_grad.size > 0:
+            final_grad = list(final_euclidean_grad)
+            final_grad_label = "Euclidean gradient norm"
+        else:
+            final_grad = list(np.asarray(run["riemann_grad_history"], dtype=np.float64))
+            final_grad_label = "Riemannian gradient norm"
         save_live_convergence_plot(
             list(np.asarray(run["energy_history"], dtype=np.float64)),
-            list(np.asarray(run["riemann_grad_history"], dtype=np.float64)),
+            final_grad,
             live_convergence_path,
             title=final_title,
+            grad_label=final_grad_label,
         )
         if int(common["dimension"]) >= 2 and latest_scatter_samples is not None:
             target_samples = None
@@ -2089,7 +2243,10 @@ def run_all(
                     if delta > 0:
                         inner_bar.update(delta)
                     energy = float(info.get("energy", np.nan))
-                    grad = float(info.get("riemann_grad_norm", np.nan))
+                    if "euclidean_grad_norm" in info:
+                        grad = float(info.get("euclidean_grad_norm", np.nan))
+                    else:
+                        grad = float(info.get("riemann_grad_norm", np.nan))
                     if np.isfinite(energy) and np.isfinite(grad):
                         inner_bar.set_postfix_str(f"E={energy:.3e} G={grad:.3e}")
                     elif np.isfinite(energy):
