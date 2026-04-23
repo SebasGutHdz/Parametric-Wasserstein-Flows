@@ -167,3 +167,14 @@ cython_debug/
 *.gif
 *.pdf
 *.pkl
+
+# data
+/data/
+/datasets/
+#experiments
+/experiments/
+#tests
+/tests/
+inna_test.ipynb
+dataset_loading_test.ipynb
+anderson_vs_gradientflow_sample_only.ipynb
