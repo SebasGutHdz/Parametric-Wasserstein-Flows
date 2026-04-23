@@ -82,12 +82,24 @@ def plot_gradient_flow(samples_prev, samples_cur, potential, current_energy, ite
     y_range = jnp.linspace(
         all_samples[:, 1].min() - 0.5, all_samples[:, 1].max() + 0.5, 100
     )
+    problem_dim = all_samples.shape[1]
     x_bounds = (x_range[0], x_range[-1])
-    y_bounds = (x_range[0], x_range[-1])
+    y_bounds = (y_range[0], y_range[-1])
     X, Y = jnp.meshgrid(x_range, y_range)
-    # Z = jnp.array([[potential.potential_fn(x, y, **potential.potential_kwargs) for x in x_range] for y in y_range])
+
+    # Build a valid high-dimensional slice for plotting:
+    # keep coordinates 3..d fixed at their sample-mean values and vary only first 2 dims.
+    n_grid = X.size
+    if problem_dim > 2:
+        anchor = jnp.mean(all_samples, axis=0)
+        datapoints = jnp.tile(anchor, (n_grid, 1))
+        datapoints = datapoints.at[:, 0].set(X.ravel())
+        datapoints = datapoints.at[:, 1].set(Y.ravel())
+    else:
+        datapoints = jnp.stack([X.ravel(), Y.ravel()], axis=-1)
+
     Z = potential.linear.potential_fn(
-        jnp.stack([X.ravel(), Y.ravel()], axis=-1),
+        datapoints,
         **potential.linear.potential_kwargs,
     ).reshape(X.shape)
 
@@ -138,7 +150,8 @@ def plot_gradient_flow(samples_prev, samples_cur, potential, current_energy, ite
 
     # 2D contour view (similar to original)
     ax2d = fig.add_subplot(1, 2, 2)
-    ax2d = potential.linear.plot_function(fig=fig, ax=ax2d, x_bds=x_bounds, y_bds=y_bounds)
+    contour = ax2d.contourf(X, Y, Z, levels=100, cmap="cividis", alpha=0.5)
+    fig.colorbar(contour, ax=ax2d)
     ax2d.scatter(
         samples_prev[:, 0],
         samples_prev[:, 1],
@@ -156,5 +169,7 @@ def plot_gradient_flow(samples_prev, samples_cur, potential, current_energy, ite
         label=f"Iteration {iteration}",
     )
     ax2d.set_title(f"Contour View - Iteration {iteration}")
+    ax2d.set_xlim(x_bounds[0], x_bounds[1])
+    ax2d.set_ylim(y_bounds[0], y_bounds[1])
     ax2d.legend()
     return fig

@@ -128,7 +128,7 @@ def minres(
             Tk_under = Tk_under.at[j + 1, j].set(betas[j])
 
         # rhs = beta1 * e1
-        rhs = jnp.zeros((k + 1,), dtype=jnp.float64).at[0].set(beta1)
+        rhs = jnp.zeros((k + 1,), dtype=jnp.float32).at[0].set(beta1)
 
         # Solve least-squares via reduced QR (robust and avoids jnp.linalg.lstsq availability issues)
         # Tk_under is (k+1, k) -> Q:(k+1,k), R:(k,k)
@@ -136,9 +136,9 @@ def minres(
         # Solve R y = Q^T rhs
         y = jnp.linalg.solve(R, Q.T @ rhs)
 
-        # form x_k = V_k * y (only first k vectors)
+        # form x_k = x0 + V_k * y (only first k vectors)
         y = jnp.asarray(y)[:k]
-        xk = linear_combination(Vs[:k], y)
+        xk = add_trees(x, linear_combination(Vs[:k], y))
 
         # compute residual norm || rhs - Tk_under @ y ||
         res_vec = rhs - Tk_under @ y

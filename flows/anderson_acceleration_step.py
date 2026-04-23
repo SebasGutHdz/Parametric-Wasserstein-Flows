@@ -20,6 +20,22 @@ from flows.gradient_flow_step import gradient_flow_step
 from functionals.functional import Potential
 from parametric_model.parametric_model import ParametricModel
 
+from collections import deque
+
+
+def _update_lifo_history(history, item, max_size: int):
+    """
+    Update a bounded LIFO history where index 0 is always the newest entry.
+    """
+    if isinstance(history, deque):
+        updated = deque(history, maxlen=max_size)
+    elif history is None:
+        updated = deque(maxlen=max_size)
+    else:
+        updated = deque(history, maxlen=max_size)
+    updated.appendleft(item)
+    return updated
+
 
 def anderson_step(
     parametric_model: ParametricModel,
@@ -35,12 +51,16 @@ def anderson_step(
     memory_size: int = 5,
     relaxation: float = 1.0,
     anderson_tol: float = 1e-6,
-    solver: str = "minres",
+    solver: str = "cg",
     solver_tol: float = 1e-6,
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
     l2_reg_gamma: float = 1e-6,
+    l2_inner_product: bool = False,
     graphdef: Optional[nnx.GraphDef] = None,
+    outer_iter: Optional[int] = None,
+    run_id: Optional[str] = None,
+    method_name: Optional[str] = None,
 ) -> Tuple[PyTree, List[PyTree], List[PyTree], Dict]:
     """
     Anderson acceleration step for fixed-point iteration.
@@ -86,6 +106,10 @@ def anderson_step(
             only_return_params=True,
             graphdef=graphdef,
             current_params=current_params,
+            outer_iter=outer_iter,
+            phase="bootstrap_theta1",
+            run_id=run_id,
+            method_name=method_name,
         )
         r_0 = compute_fixed_point_residual(
             parametric_model,
@@ -97,6 +121,10 @@ def anderson_step(
             solver,
             solver_tol,
             regularization,
+            outer_iter=outer_iter,
+            phase="bootstrap_r0",
+            run_id=run_id,
+            method_name=method_name,
         )
         r_1 = compute_fixed_point_residual(
             parametric_model,
@@ -108,11 +136,22 @@ def anderson_step(
             solver,
             solver_tol,
             regularization,
+            outer_iter=outer_iter,
+            phase="bootstrap_r1",
+            run_id=run_id,
+            method_name=method_name,
         )
+
+        
         # Compute difference for theta and residuals
         delta_theta_0 = jax.tree.map(lambda a, b: b - a, current_params, theta_1)
         delta_r_0 = jax.tree.map(lambda a, b: b - a, r_0, r_1)
-        return ([theta_1, current_params], [r_1, r_0], [delta_theta_0], [delta_r_0])
+        return (
+            deque([theta_1, current_params], maxlen=memory_size + 1),
+            deque([r_1, r_0], maxlen=memory_size + 1),
+            deque([delta_theta_0], maxlen=memory_size),
+            deque([delta_r_0], maxlen=memory_size),
+        )
 
     # For non-empty history, perform Anderson acceleration
     # Get current residual
@@ -126,7 +165,9 @@ def anderson_step(
         residual_diff,
         G_mat,
         z_samples,
+        params=current_params,
         l2_regularization=l2_reg_gamma,
+        l2_inner_product=l2_inner_product,
     )
 
     # Compute mixed residuals \bar{r}_n
@@ -142,9 +183,57 @@ def anderson_step(
             lambda step, dx: step - gamma_i * dx, delta_theta_n, param_diff[i]
         )
     # Update parameters
-    theta_new = jax.tree.map(lambda p, d: p + d, current_params, delta_theta_n)
+    theta_candidate = jax.tree.map(lambda p, d: p + d, current_params, delta_theta_n)
 
-    # Compute new residual
+    # Safeguard: if Anderson candidate does not decrease energy on the same sample
+    # block, fall back to one plain gradient-flow step.
+    # energy_old, _, _, _, _ = potential.evaluate_energy(
+    #     parametric_model=parametric_model,
+    #     z_samples=z_samples,
+    #     params=current_params,
+    # )
+    # energy_candidate, _, _, _, _ = potential.evaluate_energy(
+    #     parametric_model=parametric_model,
+    #     z_samples=z_samples,
+    #     params=theta_candidate,
+    # )
+    # fallback_to_gf = (not bool(jnp.isfinite(energy_candidate))) or (
+    #     float(energy_candidate) > float(energy_old)
+    # )
+
+    # if fallback_to_gf:
+    #     theta_gf, _ = gradient_flow_step(
+    #         parametric_model=parametric_model,
+    #         z_samples=z_samples,
+    #         G_mat=G_mat,
+    #         potential=potential,
+    #         step_size=step_size,
+    #         solver=solver,
+    #         solver_tol=solver_tol,
+    #         solver_maxiter=solver_maxiter,
+    #         regularization=regularization,
+    #         only_return_params=True,
+    #         graphdef=graphdef,
+    #         current_params=current_params,
+    #         outer_iter=outer_iter,
+    #         phase="safeguard_fallback_theta",
+    #         run_id=run_id,
+    #         method_name=method_name,
+    #     )
+    #     energy_gf, _, _, _, _ = potential.evaluate_energy(
+    #         parametric_model=parametric_model,
+    #         z_samples=z_samples,
+    #         params=theta_gf,
+    #     )
+    #     # If fallback is invalid numerically, keep current iterate and restart memory.
+    #     if bool(jnp.isfinite(energy_gf)):
+    #         theta_new = theta_gf
+    #     else:
+    #         theta_new = current_params
+    # else:
+    theta_new = theta_candidate
+
+    # Compute new residual at the Anderson-mixed iterate
     r_new = compute_fixed_point_residual(
         parametric_model,
         theta_new,
@@ -155,14 +244,28 @@ def anderson_step(
         solver,
         solver_tol,
         regularization,
+        outer_iter=outer_iter,
+        phase="residual_eval",
+        run_id=run_id,
+        method_name=method_name,
+        solver_x0=None,
     )
     # Compute new residual difference
     delta_r_new = jax.tree.map(lambda a, b: b - a, r_n, r_new)
-    # Update histores
-    new_params_history = ([theta_new] + param_history)[: memory_size + 1]
-    new_residual_history = ([r_new] + residual_history)[: memory_size + 1]
-    new_param_diff = ([delta_theta_n] + param_diff)[:memory_size]
-    new_residual_diff = ([delta_r_new] + residual_diff)[:memory_size]
+    # Update histories in LIFO order (newest item at index 0)
+    new_params_history = _update_lifo_history(param_history, theta_new, memory_size + 1)
+    new_residual_history = _update_lifo_history(
+        residual_history, r_new, memory_size + 1
+    )
+    new_param_diff = _update_lifo_history(param_diff, delta_theta_n, memory_size)
+    new_residual_diff = _update_lifo_history(
+        residual_diff, delta_r_new, memory_size
+    )
+    # if fallback_to_gf:
+    #     # Failed AA direction: restart acceleration memory to avoid reusing
+    #     # unstable/stale secant information.
+    #     new_param_diff = deque(maxlen=memory_size)
+    #     new_residual_diff = deque(maxlen=memory_size)
 
     # Note: Removed nnx.update - caller handles model state via params
 
@@ -184,6 +287,11 @@ def compute_fixed_point_residual(
     solver: str,
     solver_tol: float,
     regularization: float,
+    outer_iter: Optional[int] = None,
+    phase: str = "residual_eval",
+    run_id: Optional[str] = None,
+    method_name: Optional[str] = None,
+    solver_x0: Optional[PyTree] = None,
 ) -> PyTree:
     """
     Compute fixed point residual r = -h * G^{-1} grad F(p) for parameters p
@@ -206,6 +314,13 @@ def compute_fixed_point_residual(
         parametric_model, z_samples, params
     )
     # Solve linear system
+    if hasattr(G_mat, "set_linear_solve_context"):
+        G_mat.set_linear_solve_context(
+            run_id=run_id,
+            method_name=method_name,
+            outer_iter=outer_iter,
+            phase=phase,
+        )
     eta, solver_info = G_mat.solve_system(
         z_samples,
         energy_grad,
@@ -214,6 +329,7 @@ def compute_fixed_point_residual(
         maxiter=50,
         method=solver,
         regularization=regularization,
+        x0=solver_x0,
     )
     # Fixed point residual
     residual = jax.tree.map(lambda x: -step_size * x, eta)
@@ -225,8 +341,10 @@ def compute_anderson_gamma(
     residual_differences: List[PyTree],
     G_mat: G_matrix,
     z_samples: Array,
+    params: PyTree,
     tol: float = 1e-6,
     l2_regularization: float = 1e-6,
+    l2_inner_product: bool = False,
 ) -> Tuple[List[float], Dict]:
     """
     Solve Anderson mixing optimization using G-matrix norm:
@@ -244,31 +362,38 @@ def compute_anderson_gamma(
     m = len(residual_differences)
 
     if m == 0:
-        return []  # , {'converged': True, 'residual_reduction': 0.0}
+        return []
 
     # Build least-squares system: A γ = b
     A = jnp.zeros((m, m))
     b = jnp.zeros((m,))
 
-    for i in range(m):
-        for j in range(i, m):
-            # A_ij = ⟨Δr_i, Δr_j⟩_G
-            A = A.at[i, j].set(
-                G_mat.inner_product(
-                    residual_differences[i], residual_differences[j], z_samples
-                )
-            )
-        # b_i = ⟨r_n, Δr_i⟩_G
-        b = b.at[i].set(
-            G_mat.inner_product(current_residual, residual_differences[i], z_samples)
-        )
-    A = 0.5*(A + A.T)
-    # Add l2 regulzarization
-    A = A + jnp.eye(A.shape[0]) * l2_regularization
-    # Solve the linear system A gamma = b
-    # gamma, info = minres(A_func=lambda x: jnp.dot(A, x), b=b, tol=tol, maxiter=100)
-    # for small dim < 15 direct solve should be better
-    gamma = jnp.linalg.solve(A, b)
-    # converged = info.get('success', False)
+    def _tree_vdot(x: PyTree, y: PyTree) -> Array:
+        leaf_dots = jax.tree.leaves(jax.tree.map(lambda a, c: jnp.vdot(a, c), x, y))
+        return jnp.sum(jnp.stack(leaf_dots))
 
-    return gamma.tolist()  # , {'converged': converged}
+    if l2_inner_product:
+        # L2 path: no G-mvp, just cheap vdots
+        for i in range(m):
+            for j in range(i, m):
+                A = A.at[i, j].set(_tree_vdot(residual_differences[i], residual_differences[j]))
+            b = b.at[i].set(_tree_vdot(current_residual, residual_differences[i]))
+    else:
+        # G-metric path: precompute G·Δr_i once per history entry — m mvp calls total
+        # (was m(m+3)/2 calls when using inner_product separately for each A_ij and b_i)
+        # A_ij = ⟨Δr_i, Δr_j⟩_G = vdot(Δr_i, G·Δr_j)
+        # b_i  = ⟨r_n,  Δr_i⟩_G = vdot(r_n,  G·Δr_i)
+        G_diffs = [
+            G_mat.mvp(z_samples, residual_differences[i], params)
+            for i in range(m)
+        ]
+        for i in range(m):
+            for j in range(i, m):
+                A = A.at[i, j].set(_tree_vdot(residual_differences[i], G_diffs[j]))
+            b = b.at[i].set(_tree_vdot(current_residual, G_diffs[i]))
+
+    A = 0.5 * (A + A.T)
+    A = A + jnp.eye(A.shape[0]) * l2_regularization
+    gamma = jnp.linalg.solve(A, b)
+
+    return gamma.tolist()

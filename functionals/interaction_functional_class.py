@@ -49,13 +49,11 @@ class InteractionPotential:
             x: Positions array of shape (batch_size, d)
             y: Positions array of shape (batch_size, d)
         Returns:
-            Interaction values of shape (batch_size, )
+            Interaction values of shape (batch_size_x, batch_size_y)
         """
-        # The correct thing to do would be to compute pairwise differences
-        # But for simplicity, we assume x and y have the same shape and compute element-wise
-
-        z = x - y  # (batch_size, d)
-
+        # Compute all pairwise differences so Monte Carlo matches
+        # 0.5 * E_{X,Y~rho}[W(X-Y)].
+        z = x[:, None, :] - y[None, :, :]  # (batch_size_x, batch_size_y, d)
         return self.interaction_fn(z, **self.interaction_kwargs)
 
     def compute_energy_gradient(

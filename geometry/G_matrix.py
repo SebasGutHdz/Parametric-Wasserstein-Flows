@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from jax import random as jrandom
 from jax import jit, vmap, grad, flatten_util
 from typing import Dict, Any, Optional
+import time
 from jaxtyping import PyTree, Array
 from functools import partial
 from jax.scipy.sparse.linalg import gmres
@@ -30,8 +31,77 @@ class G_matrix:
         """
 
         self.mapping = mapping
+        self._linear_solve_context = {
+            "run_id": None,
+            "method_name": None,
+            "outer_iter": None,
+            "phase": "unspecified",
+        }
+        self._big_solve_records = []
 
-    @partial(jit, static_argnums=(0,))
+    def clear_big_solve_records(self) -> None:
+        self._big_solve_records = []
+
+    def get_big_solve_records(self) -> list[dict]:
+        return list(self._big_solve_records)
+
+    def set_linear_solve_context(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        method_name: Optional[str] = None,
+        outer_iter: Optional[int] = None,
+        phase: Optional[str] = None,
+    ) -> None:
+        if run_id is not None:
+            self._linear_solve_context["run_id"] = run_id
+        if method_name is not None:
+            self._linear_solve_context["method_name"] = method_name
+        if outer_iter is not None:
+            self._linear_solve_context["outer_iter"] = int(outer_iter)
+        if phase is not None:
+            self._linear_solve_context["phase"] = phase
+
+    def _extract_solver_stats(
+        self, backend_info: Any, fallback_maxiter: int
+    ) -> tuple[Optional[int], Optional[bool], Optional[float], bool]:
+        iterations = None
+        converged = None
+        residual_norm = None
+        iterations_estimated = False
+        if isinstance(backend_info, dict):
+            iterations = backend_info.get(
+                "iterations",
+                backend_info.get("num_iters", backend_info.get("niter")),
+            )
+            converged = backend_info.get(
+                "success", backend_info.get("converged", backend_info.get("ok"))
+            )
+            residual_norm = backend_info.get(
+                "norm_res", backend_info.get("residual_norm", backend_info.get("residual"))
+            )
+        elif isinstance(backend_info, (int, float)):
+            # JAX scipy solvers often return integer status codes (not iteration counts).
+            # We treat 0 as converged and leave iteration count unknown.
+            converged = bool(backend_info == 0)
+        if iterations is not None:
+            try:
+                iterations = int(iterations)
+            except (TypeError, ValueError):
+                iterations = None
+        if converged is not None:
+            converged = bool(converged)
+        if residual_norm is not None:
+            try:
+                residual_norm = float(residual_norm)
+            except (TypeError, ValueError):
+                residual_norm = None
+        if iterations is None:
+            iterations = int(fallback_maxiter)
+            iterations_estimated = True
+        return iterations, converged, residual_norm, iterations_estimated
+
+    # @partial(jit, static_argnums=(0,))
     def mvp(
         self, z_samples: Array, eta: PyTree, params: Optional[PyTree] = None
     ) -> PyTree:
@@ -118,20 +188,37 @@ class G_matrix:
         # Define the linear operator for G(theta)
         matvec = lambda eta: self.mvp(z_samples, eta, params)
         # Use Jax inbuilts methods cg or gmres.
-        x, info = solver(matvec, b, tol=tol, maxiter=maxiter, x0=x0)
-        # verify solution
-        b_verif = self.mvp(z_samples, x, params)
-        # Residual relative error
-        residual = sum(
-            jax.tree.leaves(
-                jax.tree.map(
-                    lambda a, b: jnp.linalg.norm(a - b) / (jnp.linalg.norm(b) + 1e-8),
-                    b_verif,
-                    b,
-                )
-            )
+        t0 = time.perf_counter()
+        x, backend_info = solver(matvec, b, tol=tol, maxiter=maxiter, x0=x0)
+        elapsed_sec = time.perf_counter() - t0
+        iterations, converged, residual_norm, iterations_estimated = self._extract_solver_stats(
+            backend_info, fallback_maxiter=maxiter
         )
-        info = {"error": residual}
+        info = {
+            "iterations": iterations,
+            "iterations_estimated": bool(iterations_estimated),
+            "converged": converged,
+            "residual_norm": residual_norm,
+            "elapsed_sec": float(elapsed_sec),
+            "backend_info": backend_info,
+        }
+        record = {
+            "run_id": self._linear_solve_context["run_id"],
+            "method": self._linear_solve_context["method_name"],
+            "outer_iter": self._linear_solve_context["outer_iter"],
+            "phase": self._linear_solve_context["phase"],
+            "solver": method,
+            "tol": float(tol),
+            "maxiter": int(maxiter),
+            "regularization": float(regularization),
+            "iterations": iterations,
+            "iterations_estimated": bool(iterations_estimated),
+            "converged": converged,
+            "residual_norm": residual_norm,
+            "elapsed_sec": float(elapsed_sec),
+            "gmvp_count": None,
+        }
+        self._big_solve_records.append(record)
         # x,info = minres(matvec, b, tol=tol, maxiter=maxiter,x0 = x0)
         return x, info
 

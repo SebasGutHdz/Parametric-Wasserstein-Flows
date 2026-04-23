@@ -4,28 +4,24 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-from flax import nnx
-from jaxtyping import Array, PyTree
-from typing import Tuple, List, Dict, Optional
+from typing import Dict, Optional, Tuple
+
 import jax
 import jax.numpy as jnp
-import jax.scipy.linalg as jla
 import matplotlib.pyplot as plt
-from jax import Device
 import time
 import uuid
+from flax import nnx
+from jaxtyping import Array, PyTree
 
-from geometry.G_matrix import G_matrix
-from geometry.lin_alg_solvers import minres
-from flows.anderson_acceleration_step import anderson_step
+from flows.aa_tgs_step import aa_tgs_step
 from flows.visualization import plot_gradient_flow
-
 from functionals.functional import Potential
+from geometry.G_matrix import G_matrix
 from parametric_model.parametric_model import ParametricModel
-from collections import deque
 
 
-def anderson_method(
+def aa_tgs_method(
     parametric_model: ParametricModel,
     batch_size: int,
     test_data_set: Array,
@@ -43,61 +39,24 @@ def anderson_method(
     regularization: float = 1e-6,
     l2_reg_gamma: float = 1e-6,
     fixed_batch_steps: int = 25,
-    restart_steps: int = 20,
+    restart_eta: float = float("inf"),
     convergence_tol: float = 1e-6,
-    plot_intermediate=False,
+    plot_intermediate: bool = False,
     plot_frequency: int = 10,
-    save_param_trajectory=False,
-    l2_inner_product = False,
+    save_param_trajectory: bool = False,
     run_id: Optional[str] = None,
-    method_name: str = "AA",
+    method_name: str = "AA-TGS",
 ) -> Tuple[PyTree, Dict]:
     """
-    Anderson-accelerated gradient flow method for Wasserstein gradient flow.
+    AA-TGS(m)-accelerated gradient flow method.
 
-    Iteratively applies anderson_step to solve:
-        θ_{n+1} = θ_n - h · G(θ_n)^{-1} · ∇F(θ_n)
-    with Anderson acceleration for improved convergence.
-
-    Args:
-        parametric_model: ParametricModel instance
-        batch_size: Number of samples per iteration
-        test_data_set: Test data set for evaluation (num_test_samples, d)
-        G_mat: G_matrix object to compute inner products
-        potential: Potential object to compute energy and gradient
-        initial_params: Initial parameters θ_0
-        n_iterations: Maximum number of iterations
-        step_size: Step size h for the fixed-point iteration  fixed point map: (Id+h*G^{-1}*∇F)(x) = x
-        memory_size: Number of previous iterations to use for Anderson acceleration (m)
-        mixing_parameter: Mixing parameter β for Anderson acceleration
-        anderson_tol: Tolerance for Anderson subproblem solver
-        solver: Linear solver to use ('minres' or 'cg')
-        solver_tol: Tolerance for the linear solver
-        solver_maxiter: Maximum iterations for the linear solver
-        regularization: Regularization parameter for the linear system
-        fixed_batch_steps: Number of iterations to reuse the same z_samples batch.
-            Set <= 0 to resample at every iteration.
-        restart_steps: Restart Anderson memory every this many iterations (<=0 disables restart)
-        convergence_tol: Tolerance for convergence (based on residual norm)
-        verbose: Whether to print progress information
-
-    Returns:
-        final_params: Final parameters θ_n after n_iterations
-        history: Dictionary containing:
-            - 'params': List of parameters at each iteration
-            - 'residuals': List of residual norms at each iteration
-            - 'energies': List of energies at each iteration
-            - 'gamma_history': List of gamma coefficients at each iteration
-            - 'converged': Whether the method converged
-            - 'final_iteration': Final iteration number
+    Interface mirrors `anderson_method` so notebook migration can be import-level.
     """
-
-    # Initialize histories
     param_history = None
     residual_history = None
     param_diffs = None
     residual_diffs = None
-    # Split ONCE at the beginning to get graphdef
+
     graphdef, initial_split_params = nnx.split(parametric_model)
     run_id = run_id or f"{method_name}-{uuid.uuid4().hex[:10]}"
     if hasattr(G_mat, "clear_big_solve_records"):
@@ -109,73 +68,46 @@ def anderson_method(
     else:
         current_params = initial_params
 
-    # Storage for tracking progress
     params_trajectory = [initial_params]
     residual_norms = []
     energy_trajectory = []
-    gamma_history = []
-    # Obtain problem dimension from test data set
+
     problem_dim = test_data_set.shape[1]
-    # Initialize key for sample generation
     key = jax.random.PRNGKey(0)
+    converged = False
     t_start = time.perf_counter()
     lsc_big_cum = 0
     ksi_big_cum = 0
     time_big_solve_sec_cum = 0.0
     iter_metrics = []
     processed_big_records = 0
-    # Generate initial batch of reference samples
 
-    converged = False
-
-    print(f"Starting Anderson-accelerated gradient flow")
+    print("Starting AA-TGS(m)-accelerated gradient flow")
     print(f"  n_iterations: {n_iterations}")
     print(f"  step_size: {step_size}")
     print(f"  memory_size: {memory_size}")
-    print(f"  mixing_parameter: {relaxation}")
+    print("  beta_j policy: constant beta_j = step_size")
     print(f"  fixed_batch_steps: {fixed_batch_steps}")
-    print(f"  restart_steps: {restart_steps}")
+    print(f"  restart_eta: {restart_eta}")
     print("-" * 60)
 
-    # evaluate initial energy and get initial samples for plotting
     key, subkey = jax.random.split(key)
-    # z_samples = jax.random.normal(subkey, (batch_size, problem_dim))
-    z_samples = parametric_model.sampler(subkey, batch_size)
+    z_samples = jax.random.normal(subkey, (batch_size, problem_dim))
     energy_init, samples_prev, _, _, _ = potential.evaluate_energy(
         parametric_model, z_samples=test_data_set
     )
     energy_trajectory.append(float(energy_init))
     z_samples_block = z_samples
-    iter_metrics.append(
-        {
-            "run_id": run_id,
-            "method": method_name,
-            "outer_iter": -1,
-            "energy": float(energy_init),
-            "residual_norm": float("nan"),
-            "test_accuracy": None,
-            "elapsed_total_sec": 0.0,
-            "lsc_big_cum": 0,
-            "ksi_big_cum": 0,
-            "time_big_solve_sec_cum": 0.0,
-        }
-    )
 
     for iteration in range(n_iterations):
         if fixed_batch_steps <= 0:
             key, subkey = jax.random.split(key)
-            z_samples_block = parametric_model.sampler(subkey, batch_size)
+            z_samples_block = jax.random.normal(subkey, (batch_size, problem_dim))
         elif iteration % fixed_batch_steps == 0:
             key, subkey = jax.random.split(key)
-            z_samples_block = parametric_model.sampler(subkey, batch_size)
+            z_samples_block = jax.random.normal(subkey, (batch_size, problem_dim))
 
-        # Periodic restart: flush Anderson memory (diffs) while keeping current iterate.
-        if restart_steps > 0 and iteration > 0 and (iteration % restart_steps == 0):
-            param_diffs = deque(maxlen=memory_size)
-            residual_diffs = deque(maxlen=memory_size)
-
-        # Perform Anderson acceleration step
-        param_history, residual_history, param_diffs, residual_diffs = anderson_step(
+        param_history, residual_history, param_diffs, residual_diffs = aa_tgs_step(
             parametric_model=parametric_model,
             current_params=current_params,
             param_history=param_history,
@@ -194,8 +126,8 @@ def anderson_method(
             solver_maxiter=solver_maxiter,
             regularization=regularization,
             l2_reg_gamma=l2_reg_gamma,
+            restart_eta=restart_eta,
             graphdef=graphdef,
-            l2_inner_product=l2_inner_product,
             outer_iter=iteration,
             run_id=run_id,
             method_name=method_name,
@@ -219,33 +151,28 @@ def anderson_method(
                 z_samples_block,
                 params=init_params,
             )
+            residual_norms.append(float(jnp.sqrt(jnp.maximum(init_res_norm_sq, 0.0))))
 
-            residual_norms.append(jnp.sqrt(jnp.maximum(init_res_norm_sq, 0.0)))
-
-        # Extract new parameters (newest in history)
         current_params = param_history[0]
         current_residual = residual_history[0]
 
-        # Compute residual norm using G-matrix inner product at the test data set
         residual_norm_sq = G_mat.inner_product(
             current_residual,
             current_residual,
             test_data_set,
             params=current_params,
         )
-        if residual_norm_sq >= -1e-10:  # some tolerance for numerical error
+        if residual_norm_sq >= -1e-10:
             residual_norm = jnp.sqrt(jnp.maximum(residual_norm_sq, 0.0))
         else:
             raise ValueError("Non-positive residual norm squared")
 
-        # Compute energy at current parameters
         energy, x_samples, _, _, _ = potential.evaluate_energy(
             parametric_model=parametric_model,
             z_samples=test_data_set,
             params=current_params,
         )
 
-        # Store trajectory information
         if save_param_trajectory or len(params_trajectory) == 1:
             params_trajectory.append(current_params)
         else:
@@ -268,7 +195,6 @@ def anderson_method(
             }
         )
 
-        # Print progress
         if iteration % plot_frequency == 0 or iteration < 5:
             print(
                 f"Iter {iteration:4d} | "
@@ -291,30 +217,24 @@ def anderson_method(
                 except Exception as e:
                     print("Plotting failed due to the following error:")
                     print(e)
-                # Update previous samples for next plot
                 samples_prev = x_samples
 
-        # Check convergence
         if residual_norm < convergence_tol:
             converged = True
-
             print("-" * 60)
             print(f"Converged at iteration {iteration}!")
             print(f"Final residual norm: {residual_norm:.6e}")
             print(f"Final energy: {energy:.6e}")
             break
 
-    # Final message if not converged
     if not converged:
         print("-" * 60)
         print(f"Reached maximum iterations ({n_iterations})")
         print(f"Final residual norm: {residual_norms[-1]:.6e}")
         print(f"Final energy: {energy_trajectory[-1]:.6e}")
 
-    # Merge ONCE at the end to get the final model
     final_parametric_model = nnx.merge(graphdef, current_params)
 
-    # Build history dictionary
     history = {
         "params": params_trajectory,
         "residual_norms": residual_norms,

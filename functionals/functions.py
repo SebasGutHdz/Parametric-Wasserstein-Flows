@@ -80,7 +80,7 @@ def quartic_potential_fn(x: Array, strength: float = 0.1) -> Array:
 
 
 @jax.jit
-def styblinski_tang_potential_fn(x: Array, d: int = 2) -> Array:
+def styblinski_tang_potential_fn(x: Array) -> Array:
     """
     Styblinski-Tang potential U(x) = 0.5 * Σ (x_i^4 - 16*x_i^2 + 5*x_i)
     Global minimum at x_i = -2.903534 for all i
@@ -97,6 +97,23 @@ def aggregation_potential_fn(x: Array, a: int = 4, b: int = 2) -> Array:
     # return jnp.sum(jnp.abs(x)**a, axis=-1)/a - jnp.sum(jnp.abs(x)**b, axis=-1)/b
     return jnp.linalg.norm(x, axis=-1) ** a / a - jnp.linalg.norm(x, axis=-1) ** b / b
 
+
+@jax.jit
+def exponential_interaction_fn(x: Array, delta: float = 0.05):
+    '''
+    Docstring for exponential_interaction_fn
+    
+    Interaction potential W(x) = exp(-|x|^2/(4delta^2))/\sqrt{4\pi delta^2}
+
+    :param x: 
+    :type x: Array
+    :param delta: Description
+    :type delta: 0.05
+    '''
+    dim = x.shape[-1]
+    sq_norm = jnp.sum(x**2, axis=-1)
+    norm_const = (4.0 * jnp.pi * delta**2) ** (0.5 * dim)
+    return jnp.exp(-sq_norm / (4.0 * delta**2)) / norm_const
 
 @jax.jit
 def zero_potential_fn(x: Array) -> Array:
@@ -144,3 +161,12 @@ def create_potentials():
         "quartic": quartic_potential,
         "styblinski_tang": styblinski_tang_potential,
     }
+
+def dict_name_to_fn(name):
+
+    available_pots = {'zero':zero_potential_fn, 'styblisnski_tang':styblinski_tang_potential_fn}
+    if name not in available_pots.keys():
+        raise ValueError('Invalid linear potential name')
+    
+    return available_pots[name]
+    

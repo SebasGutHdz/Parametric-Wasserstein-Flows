@@ -39,9 +39,14 @@ def gradient_flow_step(
     solver_tol: float = 1e-6,
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
+    solver_x0: Optional[PyTree] = None,
     only_return_params: bool = False,
     graphdef: Optional[nnx.GraphDef] = None,
     current_params: Optional[PyTree] = None,
+    outer_iter: Optional[int] = None,
+    phase: str = "step_update",
+    run_id: Optional[str] = None,
+    method_name: Optional[str] = None,
 ) -> Tuple[Union[nnx.Module, PyTree], dict]:
     """
     Generic gradient flow step that works with any Potential
@@ -51,7 +56,7 @@ def gradient_flow_step(
         z_samples: Reference samples for Monte Carlo estimation
         G_mat: G-matrix object for linear system solving
         potential: Potential instance
-        step_size: Gradient flow step size h TODO: Implement higher order solvers or adaptive step sizing
+        step_size: Gradient flow step size h 
         solver_tol: Tolerance for linear solver
         solver_maxiter: Maximum iterations for linear solver
         regularization: Regularization parameter used in regularized cg
@@ -72,6 +77,13 @@ def gradient_flow_step(
     # Solve linear system
     # z_samples_g_mat = z_samples[::2]  # Use a subset of samples for G-matrix to save computation
 
+    if hasattr(G_mat, "set_linear_solve_context"):
+        G_mat.set_linear_solve_context(
+            run_id=run_id,
+            method_name=method_name,
+            outer_iter=outer_iter,
+            phase=phase,
+        )
     eta, solver_info = G_mat.solve_system(
         z_samples,
         energy_grad,
@@ -80,6 +92,7 @@ def gradient_flow_step(
         maxiter=solver_maxiter,
         method=solver,
         regularization=regularization,
+        x0=solver_x0,
     )
     # ODE solve.
     # TODO: Higher order derivative solvers.
@@ -99,6 +112,7 @@ def gradient_flow_step(
     )
 
     step_info = {
+        "eta": eta,
         "gradient_norm": grad_norm,
         "riemann_gradient_norm": riemann_grad_norm,
         "eta_norm": eta_norm,
@@ -108,6 +122,12 @@ def gradient_flow_step(
         "linear_energy": energy_breakdown["linear_energy"],
         "interaction_energy": energy_breakdown["interaction_energy"],
         "step_size": step_size,
+        "big_solve_iterations": solver_info.get("iterations"),
+        "big_solve_iterations_estimated": solver_info.get(
+            "iterations_estimated", False
+        ),
+        "big_solve_converged": solver_info.get("converged"),
+        "big_solve_elapsed_sec": solver_info.get("elapsed_sec", 0.0),
     }
 
     if only_return_params:

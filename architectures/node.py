@@ -237,7 +237,7 @@ class NeuralODE(nnx.Module):
         if method == "exact":
             return divergence_vf(model, t, x, self.time_dependent)
         elif method == "hutchinson":
-            return divergence_vf_hutch(model, t, x, self.time_dependent, num_samples=50)
+            return divergence_vf_hutch(model, t, x, self.time_dependent, num_samples=10)
 
     def jacobian_grad_and_div(
         self,

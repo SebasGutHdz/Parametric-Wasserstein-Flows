@@ -229,7 +229,7 @@ def run_hamiltonian_flow(
                 "Energy": f"{step_info['energy']:.6f}",
                 "Linear": f"{step_info['linear_energy']:.6f}",
                 "Internal": f"{step_info['internal_energy']:.6f}",
-                "Interaction": f"{step_info['interaction_energy']:.6f}",
+                "Interaction": f"{step_info['interaction_energy']:.3e}",
                 "||p||": f"{momentum_norm:.6f}",
                 "||delta theta||": f"{param_increment:.6f}",
             }

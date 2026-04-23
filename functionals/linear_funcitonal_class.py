@@ -35,6 +35,10 @@ class LinearPotential:
                          potential values (batch_size,)
             **potential_kwargs: Additional keyword arguments for the potential function
         """
+        if not callable(potential_fn):
+            raise TypeError(
+                "potential_fn must be callable. "
+            )
         self.potential_fn = potential_fn
         self.potential_kwargs = potential_kwargs
         self.coeff = coeff
