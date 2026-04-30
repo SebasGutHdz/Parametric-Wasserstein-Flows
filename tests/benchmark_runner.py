@@ -31,8 +31,6 @@ from jax.scipy.special import logsumexp
 from num2tex import num2tex
 from tqdm.auto import tqdm
 
-from ott.tools.sliced import sliced_wasserstein
-
 # TODO: proper installation
 root_path = Path.cwd().parent.absolute()
 import sys
@@ -1879,11 +1877,23 @@ def compute_sliced_wasserstein_distance(
     model_samples: jnp.ndarray,
     test_samples: jnp.ndarray,
     n_projections: int,
-    seed: int,
+    rng: jax.Array,
 ) -> float:
-    raise NotImplementedError(
-        "Sliced Wasserstein via jax.ott is not implemented yet. "
-        "Use model_samples, test_samples, n_projections, and seed here."
+    try:
+        from ott.tools.sliced import sliced_wasserstein
+    except ImportError as exc:
+        raise ImportError(
+            "Sliced Wasserstein requires ott-jax. Install it only when running "
+            "dataset benchmarks that need SW metrics."
+        ) from exc
+
+    return float(
+        sliced_wasserstein(
+            model_samples,
+            test_samples,
+            n_proj=n_projections,
+            rng=rng,
+        )[0]
     )
 
 
@@ -1910,13 +1920,11 @@ def compute_sliced_wasserstein_stats(
         )
         test_samples = jnp.asarray(X_test[np.asarray(idx)], dtype=jnp.float32)
         values.append(
-            float(
-                sliced_wasserstein(
-                    model_samples,
-                    test_samples,
-                    n_proj=sliced_n_projections,
-                    rng=sw_key,
-                )[0]
+            compute_sliced_wasserstein_distance(
+                model_samples=model_samples,
+                test_samples=test_samples,
+                n_projections=sliced_n_projections,
+                rng=sw_key,
             )
         )
 
