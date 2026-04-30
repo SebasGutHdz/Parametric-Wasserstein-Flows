@@ -83,7 +83,7 @@ class G_matrix:
         params: Optional[PyTree] = None,
         tol: float = 1e-5,
         maxiter: int = 10,
-        method: str = "minres",
+        method: str = "cg",
         regularization: float = 1e-6,
         x0: Optional[PyTree] = None,
     ) -> PyTree:
@@ -120,18 +120,18 @@ class G_matrix:
         # Use Jax inbuilts methods cg or gmres.
         x, info = solver(matvec, b, tol=tol, maxiter=maxiter, x0=x0)
         # verify solution
-        b_verif = self.mvp(z_samples, x, params)
-        # Residual relative error
-        residual = sum(
-            jax.tree.leaves(
-                jax.tree.map(
-                    lambda a, b: jnp.linalg.norm(a - b) / (jnp.linalg.norm(b) + 1e-8),
-                    b_verif,
-                    b,
-                )
-            )
-        )
-        info = {"error": residual}
+        # b_verif = self.mvp(z_samples, x, params)
+        # # Residual relative error
+        # residual = sum(
+        #     jax.tree.leaves(
+        #         jax.tree.map(
+        #             lambda a, b: jnp.linalg.norm(a - b) / (jnp.linalg.norm(b) + 1e-8),
+        #             b_verif,
+        #             b,
+        #         )
+        #     )
+        # )
+        # info = {"error": residual}
         # x,info = minres(matvec, b, tol=tol, maxiter=maxiter,x0 = x0)
         return x, info
 

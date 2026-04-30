@@ -38,8 +38,9 @@ def run_gradient_flow(
     potential: Potential,
     N_samples: int = 100,
     h: float = 0.01,
-    solver: str = "minres",
+    solver: str = "cg",
     max_iterations: int = 100,
+    solver_maxiter: int = 50,
     tolerance: float = 1e-6,
     regularization: float = 1e-6,
     progress_every: int = 10,
@@ -57,10 +58,12 @@ def run_gradient_flow(
         z_samples: Reference samples for Monte Carlo estimation
         G_mat: G-matrix object for linear system solving
         potential: Potential instance defining the energy functional
+        N_samples: Number of samples to use for Monte Carlo estimation at each step
         solver: str type of solver, choose from cg, and minres
         h: Time step size
         max_iterations: Maximum number of gradient flow steps
         tolerance: Convergence tolerance for energy
+        solver_maxiter: Maximum iterations for linear solver
         use_regularization: Whether to use regularized CG solver
         progress_every: Print progress every N iterations
 
@@ -105,11 +108,13 @@ def run_gradient_flow(
             step_size=h,
             solver=solver,
             solver_tol=tolerance,
+            solver_maxiter= solver_maxiter,
             regularization=regularization,
         )
 
         # Evaluate new energy
-        _, current_params = nnx.split(current_parametric_model)
+        # _, current_params = nnx.split(current_parametric_model)
+        current_params = nnx.state(current_parametric_model)
         current_energy = step_info["energy"]
 
         # Store diagnostics

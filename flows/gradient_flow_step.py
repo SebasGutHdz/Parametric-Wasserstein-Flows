@@ -21,7 +21,7 @@ from tqdm import tqdm
 
 from operator import add
 
-
+# Outdated function, it is not used anymore
 def move_to_device(pytree: Any, device) -> Any:
     """Recursively moves all JAX arrays in a PyTree to the specified device."""
     return jax.tree.map(
@@ -59,7 +59,8 @@ def gradient_flow_step(
     """
 
     # Get current parameters
-    _, current_params = nnx.split(parametric_model)
+    # _, current_params = nnx.split(parametric_model)
+    current_params = nnx.state(parametric_model)
 
     # Compute energy gradient using the potential
     energy_grad, energy, energy_breakdown = potential.compute_energy_gradient(
@@ -86,8 +87,10 @@ def gradient_flow_step(
         return updated_params, {}
 
     # Create updated parametric model
-    graphdef, _ = nnx.split(parametric_model)
-    updated_parametric_model = nnx.merge(graphdef, updated_params)
+    # graphdef, _ = nnx.split(parametric_model)
+    # updated_parametric_model = nnx.merge(graphdef, updated_params)
+    updated_parametric_model = nnx.clone(parametric_model)
+    nnx.update(updated_parametric_model,updated_params)
     # updated_parametric_model = move_to_device(updated_parametric_model, device)
     # Compute diagnostics
     grad_norm = jnp.sqrt(
@@ -115,3 +118,4 @@ def gradient_flow_step(
     }
 
     return updated_parametric_model, step_info
+    
