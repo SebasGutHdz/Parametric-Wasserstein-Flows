@@ -152,6 +152,8 @@ def memoryless_qn_method(
                     "energy": float(energy),
                     "riemann_grad_norm": float(residual_norm / step_size),
                     "scatter_samples": scatter_samples,
+                    "model": parametric_model,
+                    "params": params,
                     "converged": False,
                 }
             )

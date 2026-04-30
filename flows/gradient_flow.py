@@ -154,6 +154,8 @@ def run_gradient_flow(
                     "energy": float(step_info["energy"]),
                     "riemann_grad_norm": float(step_info["riemann_gradient_norm"]),
                     "scatter_samples": scatter_samples,
+                    "model": current_parametric_model,
+                    "params": current_params,
                     "converged": False,
                 }
             )

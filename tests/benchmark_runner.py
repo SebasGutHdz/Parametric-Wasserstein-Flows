@@ -17,7 +17,7 @@ import time
 import traceback
 import warnings
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import h5py
 import jax
@@ -30,6 +30,8 @@ from flax.training import orbax_utils
 from jax.scipy.special import logsumexp
 from num2tex import num2tex
 from tqdm.auto import tqdm
+
+from ott.tools.sliced import sliced_wasserstein
 
 # TODO: proper installation
 root_path = Path.cwd().parent.absolute()
@@ -282,9 +284,9 @@ def sanitize_component(name: str) -> str:
 
 
 def build_model(
-    common: dict[str, Any], seed: int
+    common: dict[str, Any], seed: int, dim_override: int | None = None
 ) -> tuple[ParametricModel, dict[str, Any]]:
-    dim = int(common["dimension"])
+    dim = int(dim_override if dim_override is not None else common["dimension"])
     n_hidden = int(common["n_hidden"])
     width_hidden = int(common["width_hidden"])
     model_cfg = {
@@ -442,14 +444,116 @@ def eight_gaussians_generator(n_samples: int, resample_each: int, seed: int = 3)
             yield x
 
 
-def file_dataset_generator_stub(file_path: str, n_samples: int, resample_each: int):
+def file_dataset_generator(file_path: str, n_samples: int, resample_each: int):
     raise NotImplementedError(
         "File-based dataset generator is not implemented yet "
         f"(requested file: {file_path})"
     )
 
 
-def build_target_generator(distribution_cfg: dict[str, Any], common: dict[str, Any]):
+DATASET_DISTRIBUTIONS = {"mnist", "fashion", "miniboone"}
+IMAGE_DATASETS = {"mnist", "fashion"}
+
+
+def distribution_name(distribution_cfg: dict[str, Any]) -> str | None:
+    if "name" not in distribution_cfg:
+        return None
+    return str(distribution_cfg["name"]).lower()
+
+
+def is_dataset_distribution(distribution_cfg: dict[str, Any]) -> bool:
+    name = distribution_name(distribution_cfg)
+    return name in DATASET_DISTRIBUTIONS
+
+
+def is_image_distribution(distribution_cfg: dict[str, Any]) -> bool:
+    name = distribution_name(distribution_cfg)
+    return name in IMAGE_DATASETS
+
+
+def flatten_and_normalize_train_test(
+    X_train: np.ndarray,
+    X_test: np.ndarray,
+    eps: float = 1e-6,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    train = np.asarray(X_train, dtype=np.float32).reshape((X_train.shape[0], -1))
+    test = np.asarray(X_test, dtype=np.float32).reshape((X_test.shape[0], -1))
+
+    mu = train.mean(axis=0)
+    s = train.std(axis=0)
+    safe_s = np.where(s > eps, s, 1.0).astype(np.float32)
+
+    train_norm = ((train - mu) / safe_s).astype(np.float32)
+    test_norm = ((test - mu) / safe_s).astype(np.float32)
+    return train_norm, test_norm, mu.astype(np.float32), s.astype(np.float32), safe_s
+
+
+def prepare_dataset_context(
+    distribution_cfg: dict[str, Any], common: dict[str, Any]
+) -> dict[str, Any]:
+    name = distribution_name(distribution_cfg)
+    if name not in DATASET_DISTRIBUTIONS:
+        raise ValueError(f"Unsupported dataset distribution: {distribution_cfg}")
+
+    data_root = distribution_cfg.get("data_root", None)
+    X_train, X_test, _, _ = load_data(name, data_root=data_root)
+    X_train, X_test, mu, s, safe_s = flatten_and_normalize_train_test(
+        X_train,
+        X_test,
+    )
+    dataset_dim = int(X_train.shape[1])
+    config_dim = int(common.get("dimension", dataset_dim))
+    if config_dim != dataset_dim:
+        warnings.warn(
+            f"common_params.dimension={config_dim} is ignored for dataset "
+            f"'{name}'; using dataset dimension {dataset_dim}.",
+            stacklevel=2,
+        )
+
+    image_shape = (28, 28) if name in IMAGE_DATASETS else None
+    return {
+        "name": name,
+        "X_train": X_train,
+        "X_test": X_test,
+        "mu": mu,
+        "s": s,
+        "safe_s": safe_s,
+        "dim": dataset_dim,
+        "is_image": name in IMAGE_DATASETS,
+        "image_shape": image_shape,
+    }
+
+
+def dataset_batch_generator(
+    X_train: np.ndarray,
+    n_samples: int,
+    resample_each: int,
+    seed: int = 3,
+):
+    X_train = jnp.array(X_train)
+    key = jax.random.PRNGKey(seed)
+    n_train = int(X_train.shape[0])
+    n_batches = int(np.ceil(n_train / n_samples))
+    while True:
+        key, idx_key = jax.random.split(key)
+        X_perm = jax.random.permutation(key, X_train)
+        for i in range(n_batches):
+            batch = jnp.asarray(X_perm[i : i + n_samples], dtype=jnp.float32)
+            for _ in range(resample_each):
+                yield batch
+
+
+def sample_dataset_rows(X: np.ndarray, n_samples: int, seed: int) -> np.ndarray:
+    key = jax.random.PRNGKey(seed)
+    idx = np.asarray(jax.random.randint(key, (n_samples,), 0, int(X.shape[0])))
+    return np.asarray(X[idx], dtype=np.float32)
+
+
+def build_target_generator(
+    distribution_cfg: dict[str, Any],
+    common: dict[str, Any],
+    dataset_context: dict[str, Any] | None = None,
+):
     if "n_samples" not in distribution_cfg:
         raise ValueError("distribution.n_samples is required for generative problems")
     if "resample_each" not in distribution_cfg:
@@ -474,6 +578,15 @@ def build_target_generator(distribution_cfg: dict[str, Any], common: dict[str, A
     if has_name:
         dist_name = str(distribution_cfg["name"]).lower()
         seed = int(distribution_cfg.get("seed", 3))
+        if dist_name in DATASET_DISTRIBUTIONS:
+            if dataset_context is None:
+                dataset_context = prepare_dataset_context(distribution_cfg, common)
+            return dataset_batch_generator(
+                X_train=dataset_context["X_train"],
+                n_samples=n_samples,
+                resample_each=resample_each,
+                seed=seed,
+            )
         if dist_name == "checkerboard":
             dim = int(common["dimension"])
             if dim != 2:
@@ -501,7 +614,7 @@ def build_target_generator(distribution_cfg: dict[str, Any], common: dict[str, A
             "Unknown generative toy distribution name: " f"{distribution_cfg['name']}"
         )
 
-    return file_dataset_generator_stub(
+    return file_dataset_generator(
         file_path=str(distribution_cfg["file"]),
         n_samples=n_samples,
         resample_each=resample_each,
@@ -509,7 +622,9 @@ def build_target_generator(distribution_cfg: dict[str, Any], common: dict[str, A
 
 
 def build_problem(
-    problem_cfg: dict[str, Any], common: dict[str, Any]
+    problem_cfg: dict[str, Any],
+    common: dict[str, Any],
+    dataset_context: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     problem = normalize_problem_entry(problem_cfg)
     functional_cfg = dict(problem["functional"])
@@ -520,7 +635,22 @@ def build_problem(
         potential = _build_kl_problem(distribution_cfg, common)
         return potential, {"problem": problem}
 
-    target_generator = build_target_generator(distribution_cfg, common)
+    target_generator = build_target_generator(
+        distribution_cfg,
+        common,
+        dataset_context=dataset_context,
+    )
+    dataset_meta: dict[str, Any] = {}
+    if dataset_context is not None:
+        dataset_meta = {
+            "dataset_name": dataset_context["name"],
+            "dataset_dim": int(dataset_context["dim"]),
+            "dataset_is_image": bool(dataset_context["is_image"]),
+            "dataset_mu_mean": float(np.mean(dataset_context["mu"])),
+            "dataset_mu_std": float(np.std(dataset_context["mu"])),
+            "dataset_std_mean": float(np.mean(dataset_context["s"])),
+            "dataset_std_std": float(np.std(dataset_context["s"])),
+        }
 
     if functional_kind == "MMD":
         bw_multipliers_raw = functional_cfg.get("bw_multipliers", None)
@@ -542,6 +672,7 @@ def build_problem(
         potential = MMDEnergy(target_generator, bandwidths)
         return potential, {
             "problem": problem,
+            **dataset_meta,
             "mmd_bandwidth_median": bw,
             "mmd_bandwidths": [float(v) for v in np.asarray(bandwidths)],
         }
@@ -549,7 +680,7 @@ def build_problem(
     if functional_kind == "CrossEntropy":
         trace_method = str(functional_cfg.get("trace_method", "hutchinson"))
         potential = CrossEntropyEnergy(target_generator, trace_method=trace_method)
-        return potential, {"problem": problem}
+        return potential, {"problem": problem, **dataset_meta}
 
     raise ValueError(f"Unsupported functional kind: {functional_kind}")
 
@@ -591,9 +722,12 @@ def build_plot_potential_2d(distribution_cfg: dict[str, Any]) -> LinearPotential
 
 
 def sample_reference(
-    common: dict[str, Any], seed: int, n_samples: int | None = None
+    common: dict[str, Any],
+    seed: int,
+    n_samples: int | None = None,
+    dim_override: int | None = None,
 ) -> jnp.ndarray:
-    dim = int(common["dimension"])
+    dim = int(dim_override if dim_override is not None else common["dimension"])
     n = int(n_samples if n_samples is not None else common.get("plot_n_samples", 300))
     key = jax.random.PRNGKey(seed)
     return jax.random.normal(key, (n, dim))
@@ -623,7 +757,9 @@ FIRST_ORDER_CONTROL_KEYS = {
 }
 
 
-def extract_first_order_optimizer_kwargs(method_params: dict[str, Any]) -> dict[str, Any]:
+def extract_first_order_optimizer_kwargs(
+    method_params: dict[str, Any],
+) -> dict[str, Any]:
     optimizer_kwargs = {
         key: value
         for key, value in method_params.items()
@@ -646,10 +782,23 @@ def run_single(
     run_id: str,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     diagnostic_sample_size: int | None = None,
+    dataset_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     problem = normalize_problem_entry(problem_cfg)
-    model, model_cfg = build_model(common, run_seed)
-    potential, potential_meta = build_problem(problem, common)
+    if dataset_context is None and is_dataset_distribution(problem["distribution"]):
+        dataset_context = prepare_dataset_context(problem["distribution"], common)
+    problem_dim = (
+        int(dataset_context["dim"])
+        if dataset_context is not None
+        else int(common["dimension"])
+    )
+
+    model, model_cfg = build_model(common, run_seed, dim_override=problem_dim)
+    potential, potential_meta = build_problem(
+        problem,
+        common,
+        dataset_context=dataset_context,
+    )
     g_mat = G_matrix(model)
 
     n_samples = int(common["N_samples"])
@@ -657,7 +806,10 @@ def run_single(
     tolerance = float(common.get("tolerance", 1e-4))
     solver = common.get("linear_solver", "cg")
     z_samples = sample_reference(
-        common, run_seed + 13, n_samples=int(common.get("eval_samples", 300))
+        common,
+        run_seed + 13,
+        n_samples=int(common.get("eval_samples", 300)),
+        dim_override=problem_dim,
     )
 
     t0 = time.perf_counter()
@@ -864,6 +1016,9 @@ def append_run_to_h5(path: Path, run_id: str, run: dict[str, Any]) -> None:
             run["method_params"], sort_keys=True
         )
         grp.attrs["model_config_json"] = json.dumps(run["model_config"], sort_keys=True)
+        grp.attrs["problem_meta_json"] = json.dumps(
+            run.get("problem_meta", {}), sort_keys=True
+        )
         grp.attrs["common_json"] = json.dumps(run["common"], sort_keys=True)
         grp.attrs["runtime_sec"] = float(run["runtime_sec"])
         grp.attrs["model_ckpt_relpath"] = run["model_ckpt_relpath"]
@@ -872,6 +1027,30 @@ def append_run_to_h5(path: Path, run_id: str, run: dict[str, Any]) -> None:
         grp.create_dataset(
             "euclidean_grad_history",
             data=np.asarray(run.get("euclidean_grad_history", []), dtype=np.float64),
+        )
+        grp.create_dataset(
+            "metrics_iteration_history",
+            data=np.asarray(run.get("metrics_iteration_history", []), dtype=np.int64),
+        )
+        grp.create_dataset(
+            "nll_history",
+            data=np.asarray(run.get("nll_history", []), dtype=np.float64),
+        )
+        grp.create_dataset(
+            "bits_dim_history",
+            data=np.asarray(run.get("bits_dim_history", []), dtype=np.float64),
+        )
+        grp.create_dataset(
+            "sliced_wasserstein_mean_history",
+            data=np.asarray(
+                run.get("sliced_wasserstein_mean_history", []), dtype=np.float64
+            ),
+        )
+        grp.create_dataset(
+            "sliced_wasserstein_std_history",
+            data=np.asarray(
+                run.get("sliced_wasserstein_std_history", []), dtype=np.float64
+            ),
         )
         h5.attrs["run_count"] = int(h5.attrs.get("run_count", 0)) + 1
         h5.flush()
@@ -968,6 +1147,9 @@ def load_runs_from_h5(path: Path) -> list[dict[str, Any]]:
                     "model_config": json.loads(
                         _attr_to_str(grp.attrs.get("model_config_json", "{}"), "{}")
                     ),
+                    "problem_meta": json.loads(
+                        _attr_to_str(grp.attrs.get("problem_meta_json", "{}"), "{}")
+                    ),
                     "common": json.loads(
                         _attr_to_str(grp.attrs.get("common_json", "{}"), "{}")
                     ),
@@ -982,11 +1164,40 @@ def load_runs_from_h5(path: Path) -> list[dict[str, Any]]:
                     "riemann_grad_history": np.asarray(
                         grp["riemann_grad_history"][:], dtype=np.float64
                     ),
-                    "euclidean_grad_history": np.asarray(
-                        grp["euclidean_grad_history"][:], dtype=np.float64
-                    )
-                    if "euclidean_grad_history" in grp
-                    else np.asarray([], dtype=np.float64),
+                    "euclidean_grad_history": (
+                        np.asarray(grp["euclidean_grad_history"][:], dtype=np.float64)
+                        if "euclidean_grad_history" in grp
+                        else np.asarray([], dtype=np.float64)
+                    ),
+                    "metrics_iteration_history": (
+                        np.asarray(grp["metrics_iteration_history"][:], dtype=np.int64)
+                        if "metrics_iteration_history" in grp
+                        else np.asarray([], dtype=np.int64)
+                    ),
+                    "nll_history": (
+                        np.asarray(grp["nll_history"][:], dtype=np.float64)
+                        if "nll_history" in grp
+                        else np.asarray([], dtype=np.float64)
+                    ),
+                    "bits_dim_history": (
+                        np.asarray(grp["bits_dim_history"][:], dtype=np.float64)
+                        if "bits_dim_history" in grp
+                        else np.asarray([], dtype=np.float64)
+                    ),
+                    "sliced_wasserstein_mean_history": (
+                        np.asarray(
+                            grp["sliced_wasserstein_mean_history"][:], dtype=np.float64
+                        )
+                        if "sliced_wasserstein_mean_history" in grp
+                        else np.asarray([], dtype=np.float64)
+                    ),
+                    "sliced_wasserstein_std_history": (
+                        np.asarray(
+                            grp["sliced_wasserstein_std_history"][:], dtype=np.float64
+                        )
+                        if "sliced_wasserstein_std_history" in grp
+                        else np.asarray([], dtype=np.float64)
+                    ),
                 }
             )
     return out
@@ -1529,7 +1740,9 @@ def save_convergence_plots(
             euclidean_histories = [
                 np.asarray(run.get("euclidean_grad_history", []), dtype=np.float64)
                 for run in problem_runs
-                if np.asarray(run.get("euclidean_grad_history", []), dtype=np.float64).size
+                if np.asarray(
+                    run.get("euclidean_grad_history", []), dtype=np.float64
+                ).size
                 > 0
             ]
             if euclidean_histories and all(
@@ -1628,6 +1841,152 @@ def generate_samples(
     return np.asarray(x)
 
 
+def trace_method_for_metrics(problem: dict[str, Any]) -> str:
+    return str(problem.get("functional", {}).get("trace_method", "hutchinson"))
+
+
+def compute_nll_and_bits_dim(
+    model: ParametricModel,
+    X_test: np.ndarray,
+    trace_method: str,
+    chunk_size: int = 1024,
+) -> tuple[float, float]:
+    dim = int(X_test.shape[1])
+    log_probs: list[np.ndarray] = []
+    for start in range(0, int(X_test.shape[0]), chunk_size):
+        X_chunk = jnp.asarray(X_test[start : start + chunk_size], dtype=jnp.float32)
+        z_trajectory, timesteps = model.pull_back(X_chunk, history=True)
+        z_trajectory = z_trajectory[:, ::-1, :]
+        timesteps = timesteps[::-1]
+        z0 = z_trajectory[:, 0, :]
+        log_prob_init = -0.5 * (jnp.sum(z0**2, axis=-1) + dim * jnp.log(2.0 * jnp.pi))
+        log_pdf_model = model.log_likelihood(
+            t=timesteps,
+            xt=z_trajectory,
+            log_prob_init=log_prob_init,
+            method=trace_method,
+            log_trajectory=False,
+        )
+        log_probs.append(np.asarray(log_pdf_model, dtype=np.float64))
+
+    all_log_probs = np.concatenate(log_probs, axis=0)
+    nll = float(-np.mean(all_log_probs))
+    bits_dim = float(nll / (np.log(2.0) * dim))
+    return nll, bits_dim
+
+
+def compute_sliced_wasserstein_distance(
+    model_samples: jnp.ndarray,
+    test_samples: jnp.ndarray,
+    n_projections: int,
+    seed: int,
+) -> float:
+    raise NotImplementedError(
+        "Sliced Wasserstein via jax.ott is not implemented yet. "
+        "Use model_samples, test_samples, n_projections, and seed here."
+    )
+
+
+def compute_sliced_wasserstein_stats(
+    model: ParametricModel,
+    X_test: np.ndarray,
+    batch_size_sliced: int,
+    sliced_n_draws: int,
+    sliced_n_projections: int,
+    seed: int,
+) -> tuple[float, float]:
+    dim = int(X_test.shape[1])
+    key = jax.random.PRNGKey(seed)
+    values: list[float] = []
+    for _ in range(sliced_n_draws):
+        key, z_key, test_key, sw_key = jax.random.split(key, 4)
+        z = jax.random.normal(z_key, (batch_size_sliced, dim))
+        model_samples = model(z)
+        idx = jax.random.randint(
+            test_key,
+            (batch_size_sliced,),
+            minval=0,
+            maxval=int(X_test.shape[0]),
+        )
+        test_samples = jnp.asarray(X_test[np.asarray(idx)], dtype=jnp.float32)
+        values.append(
+            float(
+                sliced_wasserstein(
+                    model_samples,
+                    test_samples,
+                    n_proj=sliced_n_projections,
+                    rng=sw_key,
+                )[0]
+            )
+        )
+
+    values_arr = np.asarray(values, dtype=np.float64)
+    return float(np.mean(values_arr)), float(np.std(values_arr))
+
+
+def denormalize_dataset_samples(
+    samples: np.ndarray,
+    dataset_context: dict[str, Any],
+) -> np.ndarray:
+    return (
+        np.asarray(samples, dtype=np.float32) * dataset_context["safe_s"]
+        + dataset_context["mu"]
+    )
+
+
+def _image_batch_from_flat(
+    samples: np.ndarray,
+    dataset_context: dict[str, Any],
+) -> np.ndarray:
+    image_shape = dataset_context.get("image_shape")
+    if image_shape is None:
+        raise ValueError("image_shape is required for image comparison plots")
+    display_samples = denormalize_dataset_samples(samples, dataset_context)
+    return display_samples.reshape((-1, int(image_shape[0]), int(image_shape[1])))
+
+
+def save_live_image_comparison_plot(
+    model_samples: np.ndarray,
+    test_samples: np.ndarray,
+    dataset_context: dict[str, Any],
+    out_path: Path,
+    title: str,
+    n_rows: int = 10,
+    n_cols: int = 3,
+    cmap: str = "binary",
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    total = n_rows * n_cols
+    model_images = _image_batch_from_flat(model_samples[:total], dataset_context)
+    test_images = _image_batch_from_flat(test_samples[:total], dataset_context)
+
+    fig, axes = plt.subplots(
+        n_rows,
+        2 * n_cols,
+        figsize=(2.2 * 2 * n_cols, 2.2 * n_rows),
+        sharex=True,
+        sharey=True,
+    )
+    axes = np.asarray(axes).reshape(n_rows, 2 * n_cols)
+    for i in range(n_rows):
+        for j in range(n_cols):
+            model_ax = axes[i, j]
+            test_ax = axes[i, j + n_cols]
+            model_ax.matshow(model_images[i * n_cols + j], cmap=cmap)
+            test_ax.matshow(test_images[i * n_cols + j], cmap=cmap)
+            model_ax.set_axis_off()
+            test_ax.set_axis_off()
+            model_ax.set_aspect(1.0)
+            test_ax.set_aspect(1.0)
+
+    axes[0, max(0, n_cols // 2)].set_title("Model")
+    axes[0, n_cols + max(0, n_cols // 2)].set_title("Test")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
 def save_scatter_plots(
     config: dict[str, Any],
     runs: list[dict[str, Any]],
@@ -1647,6 +2006,41 @@ def save_scatter_plots(
         current_problem_label = problem_runs[0]["problem_label"]
         current_problem_slug = problem_runs[0]["problem_slug"]
         distribution_cfg = dict(problem_runs[0]["problem"]["distribution"])
+        if is_image_distribution(distribution_cfg):
+            dataset_context = prepare_dataset_context(distribution_cfg, common)
+            n_rows = int(distribution_cfg.get("n_rows", 10))
+            n_cols = int(distribution_cfg.get("n_cols", 3))
+            n_grid = n_rows * n_cols
+            for idx, run in enumerate(problem_runs):
+                model = restore_model_from_run(run, checkpoint_root)
+                run_dim = int(run["model_config"]["architecture"][0])
+                model_samples = generate_samples(
+                    model,
+                    run_dim,
+                    n_grid,
+                    seed=1000 + idx,
+                )
+                test_samples = sample_dataset_rows(
+                    dataset_context["X_test"],
+                    n_grid,
+                    seed=2000 + idx,
+                )
+                title = f"{current_problem_label}: {run['method']}"
+                out = (
+                    output_dir
+                    / f"run_all__{sanitize_component(current_problem_slug)}__{sanitize_component(run['run_id'])}__samples.pdf"
+                )
+                save_live_image_comparison_plot(
+                    model_samples=model_samples,
+                    test_samples=test_samples,
+                    dataset_context=dataset_context,
+                    out_path=out,
+                    title=title,
+                    n_rows=n_rows,
+                    n_cols=n_cols,
+                )
+            continue
+
         target_generator = None
         if problem_runs[0]["functional_kind"] in {"MMD", "CrossEntropy"}:
             target_generator = build_target_generator(distribution_cfg, common)
@@ -1675,7 +2069,8 @@ def save_scatter_plots(
             warned_scatter_kwargs,
         )
         gf_model = restore_model_from_run(gf_baseline, checkpoint_root)
-        gf_samples = generate_samples(gf_model, dim, n_samples, seed=123)
+        gf_dim = int(gf_baseline["model_config"].get("architecture", [dim])[0])
+        gf_samples = generate_samples(gf_model, gf_dim, n_samples, seed=123)
 
         methods = sorted(
             {run["method"] for run in problem_runs if run["method"] != "gradient_flow"}
@@ -1733,7 +2128,8 @@ def save_scatter_plots(
                     warned_scatter_kwargs,
                 )
                 model = restore_model_from_run(run, checkpoint_root)
-                samples = generate_samples(model, dim, n_samples, seed=1000 + idx)
+                run_dim = int(run["model_config"].get("architecture", [dim])[0])
+                samples = generate_samples(model, run_dim, n_samples, seed=1000 + idx)
                 all_method_samples.append(samples)
                 label = build_method_label_latex(
                     method, run["method_params"], method_varying_keys
@@ -1918,22 +2314,110 @@ def _execute_planned_run(
     params = dict(planned_run["params"])
     problem = normalize_problem_entry(planned_run["problem"])
     dist = dict(problem["distribution"])
+    dataset_context = None
+    if is_dataset_distribution(dist):
+        dataset_context = prepare_dataset_context(dist, common)
     target_generator = None
     if problem["functional"]["kind"] in {"MMD", "CrossEntropy"}:
-        target_generator = build_target_generator(problem["distribution"], common)
+        target_generator = build_target_generator(
+            problem["distribution"],
+            common,
+            dataset_context=dataset_context,
+        )
 
     diagnostic_root = benchmark_dir / "diagnostic_plots"
     live_convergence_path = diagnostic_root / f"run_{run_id}__convergence.pdf"
     live_scatter_path = diagnostic_root / f"run_{run_id}__scatter.pdf"
+    live_samples_path = diagnostic_root / f"run_{run_id}__samples.pdf"
 
     live_energy: list[float] = []
     live_grad: list[float] = []
     live_grad_label = "Riemannian gradient norm"
     latest_scatter_samples: np.ndarray | None = None
+    latest_model: ParametricModel | None = None
+    latest_params: Any | None = None
     warned_1d_scatter = False
+    warned_missing_metric_model = False
+    warned_nll = False
+    warned_sw = False
+    metrics_iteration_history: list[int] = []
+    nll_history: list[float] = []
+    bits_dim_history: list[float] = []
+    sliced_wasserstein_mean_history: list[float] = []
+    sliced_wasserstein_std_history: list[float] = []
+    image_grid_size = 0
+    if dataset_context is not None and bool(dataset_context["is_image"]):
+        image_grid_size = int(dist.get("n_rows", 10)) * int(dist.get("n_cols", 3))
+
+    def materialize_progress_model(
+        model: ParametricModel | None,
+        params: Any | None,
+    ) -> ParametricModel | None:
+        if model is None:
+            return None
+        if params is None:
+            return model
+        graphdef, _ = nnx.split(model)
+        return nnx.merge(graphdef, params)
+
+    def record_metrics(iteration: int) -> None:
+        nonlocal warned_missing_metric_model, warned_nll, warned_sw
+        if dataset_context is None:
+            return
+
+        eval_model = materialize_progress_model(latest_model, latest_params)
+        if eval_model is None:
+            if not warned_missing_metric_model:
+                warnings.warn(
+                    f"Skipping metrics for {run_id}: current model is unavailable.",
+                    stacklevel=2,
+                )
+                warned_missing_metric_model = True
+            return
+
+        metrics_iteration_history.append(int(iteration))
+        try:
+            nll, bits_dim = compute_nll_and_bits_dim(
+                eval_model,
+                dataset_context["X_test"],
+                trace_method=trace_method_for_metrics(problem),
+            )
+        except Exception as exc:
+            if not warned_nll:
+                warnings.warn(
+                    f"Skipping NLL/bits-dim for {run_id}: {exc}",
+                    stacklevel=2,
+                )
+                warned_nll = True
+            nll = np.nan
+            bits_dim = np.nan
+        nll_history.append(float(nll))
+        bits_dim_history.append(float(bits_dim))
+
+        try:
+            sw_mean, sw_std = compute_sliced_wasserstein_stats(
+                eval_model,
+                dataset_context["X_test"],
+                batch_size_sliced=max(1, int(dist.get("batch_size_sliced", 256))),
+                sliced_n_draws=max(1, int(dist.get("sliced_n_draws", 8))),
+                sliced_n_projections=max(1, int(dist.get("sliced_n_projections", 128))),
+                seed=int(planned_run["run_seed"]) + 100_000 + int(iteration),
+            )
+        except (ImportError, NotImplementedError) as exc:
+            if not warned_sw:
+                warnings.warn(
+                    f"Skipping sliced Wasserstein for {run_id}: {exc}",
+                    stacklevel=2,
+                )
+                warned_sw = True
+            sw_mean = np.nan
+            sw_std = np.nan
+        sliced_wasserstein_mean_history.append(float(sw_mean))
+        sliced_wasserstein_std_history.append(float(sw_std))
 
     def on_progress(info: dict[str, Any]) -> None:
-        nonlocal latest_scatter_samples, warned_1d_scatter, live_grad_label
+        nonlocal latest_scatter_samples, latest_model, latest_params
+        nonlocal warned_1d_scatter, live_grad_label
 
         iteration = int(info.get("iteration", 0)) + 1
         energy = float(info.get("energy", np.nan))
@@ -1952,6 +2436,10 @@ def _execute_planned_run(
         scatter_samples = info.get("scatter_samples", None)
         if scatter_samples is not None:
             latest_scatter_samples = np.asarray(scatter_samples)
+        if "model" in info:
+            latest_model = info["model"]
+        if "params" in info:
+            latest_params = info["params"]
 
         if progress_callback is not None:
             progress_callback(info)
@@ -1973,6 +2461,7 @@ def _execute_planned_run(
             + "\n"
             + planned_run["run_method_label"]
         )
+        record_metrics(iteration)
         save_live_convergence_plot(
             live_energy,
             live_grad,
@@ -1980,7 +2469,28 @@ def _execute_planned_run(
             title=diag_title,
             grad_label=live_grad_label,
         )
-        if int(common["dimension"]) >= 2:
+        effective_dim = (
+            int(dataset_context["dim"])
+            if dataset_context is not None
+            else int(common["dimension"])
+        )
+        if dataset_context is not None and bool(dataset_context["is_image"]):
+            if latest_scatter_samples is not None:
+                test_samples = sample_dataset_rows(
+                    dataset_context["X_test"],
+                    image_grid_size,
+                    seed=int(planned_run["run_seed"]) + int(iteration),
+                )
+                save_live_image_comparison_plot(
+                    latest_scatter_samples,
+                    test_samples,
+                    dataset_context,
+                    live_samples_path,
+                    title=diag_title,
+                    n_rows=int(dist.get("n_rows", 10)),
+                    n_cols=int(dist.get("n_cols", 3)),
+                )
+        elif effective_dim >= 2:
             if latest_scatter_samples is not None:
                 target_samples = None
                 if target_generator is not None:
@@ -2000,6 +2510,7 @@ def _execute_planned_run(
                 )
             warned_1d_scatter = True
 
+    diagnostic_sample_size = max(int(plot_n_samples), image_grid_size)
     run = run_single(
         method=method,
         method_params=params,
@@ -2009,7 +2520,8 @@ def _execute_planned_run(
         checkpoint_root=benchmark_dir,
         run_id=run_id,
         progress_callback=on_progress,
-        diagnostic_sample_size=plot_n_samples,
+        diagnostic_sample_size=diagnostic_sample_size,
+        dataset_context=dataset_context,
     )
 
     final_iter = max(1, len(run["energy_history"]))
@@ -2028,6 +2540,7 @@ def _execute_planned_run(
         else:
             final_grad = list(np.asarray(run["riemann_grad_history"], dtype=np.float64))
             final_grad_label = "Riemannian gradient norm"
+        record_metrics(final_iter)
         save_live_convergence_plot(
             list(np.asarray(run["energy_history"], dtype=np.float64)),
             final_grad,
@@ -2035,7 +2548,31 @@ def _execute_planned_run(
             title=final_title,
             grad_label=final_grad_label,
         )
-        if int(common["dimension"]) >= 2 and latest_scatter_samples is not None:
+        final_effective_dim = (
+            int(dataset_context["dim"])
+            if dataset_context is not None
+            else int(common["dimension"])
+        )
+        if (
+            dataset_context is not None
+            and bool(dataset_context["is_image"])
+            and latest_scatter_samples is not None
+        ):
+            test_samples = sample_dataset_rows(
+                dataset_context["X_test"],
+                image_grid_size,
+                seed=int(planned_run["run_seed"]) + int(final_iter),
+            )
+            save_live_image_comparison_plot(
+                latest_scatter_samples,
+                test_samples,
+                dataset_context,
+                live_samples_path,
+                title=final_title,
+                n_rows=int(dist.get("n_rows", 10)),
+                n_cols=int(dist.get("n_cols", 3)),
+            )
+        elif final_effective_dim >= 2 and latest_scatter_samples is not None:
             target_samples = None
             if target_generator is not None:
                 target_samples = np.asarray(next(target_generator))
@@ -2047,6 +2584,18 @@ def _execute_planned_run(
                 title=final_title,
                 target_samples=target_samples,
             )
+
+    run["metrics_iteration_history"] = np.asarray(
+        metrics_iteration_history, dtype=np.int64
+    )
+    run["nll_history"] = np.asarray(nll_history, dtype=np.float64)
+    run["bits_dim_history"] = np.asarray(bits_dim_history, dtype=np.float64)
+    run["sliced_wasserstein_mean_history"] = np.asarray(
+        sliced_wasserstein_mean_history, dtype=np.float64
+    )
+    run["sliced_wasserstein_std_history"] = np.asarray(
+        sliced_wasserstein_std_history, dtype=np.float64
+    )
 
     return run, final_iter
 
@@ -2613,6 +3162,77 @@ def main() -> None:
     plots_dir.mkdir(parents=True, exist_ok=True)
     save_convergence_plots(plot_config, runs_for_scatter, plots_dir)
     save_scatter_plots(plot_config, runs_for_scatter, benchmark_dir, plots_dir)
+
+
+def load_miniboone(data_root: str | Path | None = None):
+    raise NotImplementedError(
+        "MiniBoone loading is not implemented yet. Return "
+        "(X_train, X_test, y_train, y_test), where X arrays are numpy-compatible "
+        "and the first axis is the sample axis."
+    )
+
+
+def load_data(
+    target: Literal["mnist", "fashion", "miniboone"],
+    data_root: str | Path | None = None,
+):
+    match str(target).lower():
+        case "fashion":
+            import mnist_reader
+
+            root = str(data_root) if data_root is not None else "data/fashion"
+            X_train, y_train = mnist_reader.load_mnist(root, kind="train")
+            X_test, y_test = mnist_reader.load_mnist(root, kind="t10k")
+        case "mnist":
+            # Load data from https://www.openml.org/d/554
+            from sklearn.datasets import fetch_openml
+            from sklearn.model_selection import train_test_split
+
+            fetch_kwargs = {}
+            if data_root is not None:
+                fetch_kwargs["data_home"] = str(data_root)
+            X, y = fetch_openml(
+                "mnist_784",
+                version=1,
+                return_X_y=True,
+                as_frame=False,
+                **fetch_kwargs,
+            )
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=10000)
+        case "miniboone":
+            X_train, X_test, y_train, y_test = load_miniboone(data_root=data_root)
+
+        case _:
+            raise ValueError(f"dataset {target} not supported")
+
+    return X_train, X_test, y_train, y_test
+
+
+def plot_batch(
+    X: np.array,
+    nrow: int,
+    ncol: int,
+    cmap="binary",
+):
+    X = np.asarray(X)
+    if X.ndim == 2:
+        if X.shape[1] != 28 * 28:
+            raise ValueError("flat image batches must have dimension 28*28")
+        X_img = X[: nrow * ncol].reshape((nrow, ncol, 28, 28))
+    elif X.ndim == 3:
+        X_img = X[: nrow * ncol, :, :].reshape((nrow, ncol, 28, 28))
+    else:
+        raise ValueError("plot_batch expects flat or image-shaped batches")
+    fig, axs = plt.subplots(nrows=nrow, ncols=ncol, sharex=True, sharey=True)
+    axs = np.asarray(axs).reshape(nrow, ncol)
+    for i in range(nrow):
+        for j in range(ncol):
+            ax = axs[i, j]
+            ax.matshow(X_img[i, j, :, :], cmap=cmap)
+            ax.set_aspect(1.0)
+            ax.set_axis_off()
+
+    return fig
 
 
 if __name__ == "__main__":

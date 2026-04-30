@@ -94,6 +94,8 @@ def _run_first_order_optimizer(
                     "energy": float(energy),
                     "euclidean_grad_norm": float(grad_norm),
                     "scatter_samples": scatter_samples,
+                    "model": parametric_model,
+                    "params": params,
                     "converged": bool(grad_norm < convergence_tol),
                 }
             )
