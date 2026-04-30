@@ -167,3 +167,15 @@ cython_debug/
 *.gif
 *.pdf
 *.pkl
+
+
+# Data bayesian logistic regression
+/data
+/datasets
+/experiments
+dataset_loading_test.ipynb
+
+
+# remove tests
+test_aa_tgs.py
+test_lin_alg_solvers.py
