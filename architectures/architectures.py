@@ -3,7 +3,7 @@ In this file we include the basic architectures for the neural network.
 """
 
 import flax.nnx as nnx
-from typing import Callable
+from typing import Callable, Tuple
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, ArrayLike
@@ -181,3 +181,46 @@ class ResNet(nnx.Module):
             x = layer(x)
 
         return x
+
+
+class ConcatConv2D(nnx.Module):
+    """Convolutional model with time embedding via concatenation similar to one used in FFJORD paper"""
+
+    def __init__(
+        self,
+        shape_x: Tuple[int],
+        n_layers: int = 3,
+        dim_hidden: int = 64,
+        activation_fn: str = "swish",
+        rngs: nnx.Rngs = None,
+    ):
+        self.shape_x = shape_x
+        list_of_shapes = (1,) + (dim_hidden,) * n_layers + (1,)
+        self._conv_layers = nnx.List(
+            nnx.Conv(
+                list_of_shapes[i] + 1,
+                list_of_shapes[i + 1],
+                kernel_size=3,
+                rngs=rngs,
+            )
+            for i in range(n_layers + 1)
+        )
+        self._activations = nnx.List(
+            (str_to_act_fn(activation_fn),) * n_layers + (identity,)
+        )
+
+    def __call__(self, x_in):
+        # extract t from input
+        t = x_in[:, 0]
+        # extract x and add channel dimension
+        x = x_in[:, 1:].reshape((-1, *self.shape_x, 1))
+
+        for _layer, _activation in zip(self._conv_layers, self._activations):
+            # broadcast t to x shape
+            tt = jnp.broadcast_to(t[:, None, None, None], x.shape[:-1] + (1,))
+            # concatenate t as another channel
+            xtt = jnp.concatenate((x, tt), axis=-1)
+            x = _activation(_layer(xtt))
+
+        # flatten x again
+        return x.reshape((x_in.shape[0], -1))

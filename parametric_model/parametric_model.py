@@ -6,7 +6,7 @@ import warnings
 from jaxtyping import PyTree, Array
 from core.types import SampleArray, TimeArray, VelocityArray, TrajectoryArray
 from architectures.node import NeuralODE
-from architectures.architectures import MLP, ResNet
+from architectures.architectures import ConcatConv2D, MLP, ResNet
 
 
 class ParametricModel(nnx.Module):
@@ -104,7 +104,7 @@ class ParametricModel(nnx.Module):
 
         # RHS model type
         if "rhs_model" in kwargs:
-            valid_rhs = {"mlp", "resnet"}
+            valid_rhs = {"mlp", "resnet", "concat_conv2d"}
             if kwargs["rhs_model"] not in valid_rhs:
                 raise ValueError(f"rhs_model must be one of {valid_rhs}")
 
@@ -181,6 +181,29 @@ class ParametricModel(nnx.Module):
                 activation_fn=activation_fn,
                 rngs=rngs,
             )
+        elif rhs_model_type == "concat_conv2d":
+            if not time_dependent:
+                raise ValueError(
+                    "concat_conv2d NODE rhs_model requires time_dependent=True"
+                )
+            shape_x = kwargs.get("shape_x", None)
+            if shape_x is None:
+                raise ValueError("concat_conv2d NODE rhs_model requires shape_x")
+            shape_x = tuple(int(v) for v in shape_x)
+            warnings.warn(
+                "Ignoring architecture input dimension for concat_conv2d; "
+                f"using shape_x={shape_x}.",
+                stacklevel=2,
+            )
+            rhs_model = ConcatConv2D(
+                shape_x=shape_x,
+                n_layers=num_layers,
+                dim_hidden=width_layers,
+                activation_fn=activation_fn,
+                rngs=rngs,
+            )
+        else:
+            raise ValueError(f"Unknown NODE rhs_model: {rhs_model_type}")
 
         # Store the Neural ODE as the primary model
         self.model = NeuralODE(

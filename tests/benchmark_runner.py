@@ -282,14 +282,26 @@ def sanitize_component(name: str) -> str:
 
 
 def build_model(
-    common: dict[str, Any], seed: int, dim_override: int | None = None
+    common: dict[str, Any],
+    seed: int,
+    dim_override: int | None = None,
+    dataset_context: dict[str, Any] | None = None,
 ) -> tuple[ParametricModel, dict[str, Any]]:
     dim = int(dim_override if dim_override is not None else common["dimension"])
     n_hidden = int(common["n_hidden"])
     width_hidden = int(common["width_hidden"])
+    rhs_model = common.get("rhs_model", "mlp")
+    shape_x = common.get("shape_x", None)
+    if rhs_model == "concat_conv2d" and shape_x is None:
+        if dataset_context is None or dataset_context.get("image_shape") is None:
+            raise ValueError(
+                "rhs_model='concat_conv2d' requires an image dataset or "
+                "common_params.shape_x"
+            )
+        shape_x = list(dataset_context["image_shape"])
     model_cfg = {
         "parametric_map": common.get("parametric_map", "node"),
-        "rhs_model": common.get("rhs_model", "mlp"),
+        "rhs_model": rhs_model,
         "activation_fn": common.get("activation_fn", "tanh"),
         "time_dependent": bool(common.get("time_dependent", True)),
         "solver": common.get("ode_solver", "euler"),
@@ -299,6 +311,8 @@ def build_model(
         "architecture": [dim, n_hidden, width_hidden],
         "seed": seed,
     }
+    if shape_x is not None:
+        model_cfg["shape_x"] = [int(v) for v in shape_x]
     model = ParametricModel(
         parametric_map=model_cfg["parametric_map"],
         rhs_model=model_cfg["rhs_model"],
@@ -310,6 +324,7 @@ def build_model(
         ref_density=model_cfg["ref_density"],
         scale_factor=model_cfg["scale_factor"],
         key=jax.random.PRNGKey(seed),
+        shape_x=model_cfg.get("shape_x", None),
     )
     return model, model_cfg
 
@@ -791,7 +806,12 @@ def run_single(
         else int(common["dimension"])
     )
 
-    model, model_cfg = build_model(common, run_seed, dim_override=problem_dim)
+    model, model_cfg = build_model(
+        common,
+        run_seed,
+        dim_override=problem_dim,
+        dataset_context=dataset_context,
+    )
     potential, potential_meta = build_problem(
         problem,
         common,
@@ -1812,6 +1832,7 @@ def restore_model_from_run(
         ref_density=run["model_config"]["ref_density"],
         scale_factor=run["model_config"]["scale_factor"],
         key=jax.random.PRNGKey(seed),
+        shape_x=run["model_config"].get("shape_x", None),
     )
     template_state = nnx.state(model)
     ckpt_path = checkpoint_root / run["model_ckpt_relpath"]
