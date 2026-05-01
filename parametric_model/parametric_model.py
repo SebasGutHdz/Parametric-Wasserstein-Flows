@@ -299,6 +299,18 @@ class ParametricModel(nnx.Module):
             return model(samples), None
         return model(samples)
 
+    @staticmethod
+    def apply(graphdef, params, samples: jnp.ndarray, history: bool = False):
+        """
+        Functional forward pass from a pre-extracted graphdef + params.
+        Safe to call inside @jax.jit because graphdef is structural (static)
+        and params flows as a dynamic traced argument.
+        """
+        model = nnx.merge(graphdef, params)
+        if history:
+            return model(samples, history=True)
+        return model(samples)
+
     def sampler(self, key: jax.random.PRNGKey, num_samples: int) -> jnp.ndarray:
         """
         Sample from the reference density λ.

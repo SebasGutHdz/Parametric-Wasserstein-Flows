@@ -41,6 +41,9 @@ class Potential:
         self.linear = linear
         self.internal = internal
         self.interaction = interaction
+        # Cache for JIT-compiled energy gradient function (built on first call)
+        self._compiled_energy_grad = None
+        self._compiled_graphdef = None
 
     def evaluate_energy(
         self,
@@ -122,7 +125,7 @@ class Potential:
         Args:
             parametric_model: ParametricModel instance
             z_samples: Reference samples (batch_size, d)
-            params: Optional PyTree of parameters for the dynamics model
+            params: PyTree of parameters for the dynamics model
         Returns:
             energy_gradient: Gradient of the total energy functional
         """
@@ -130,68 +133,85 @@ class Potential:
         if params is None:
             _, params = nnx.split(parametric_model)
 
-        def energy_evaluation(p: PyTree) -> Array:
-            # Transform reference samples
-            if self.internal is not None:
-                z_trajectory, time_steps = parametric_model(
-                    z_samples, history=True, params=p
-                )  # (batch_size, time_steps, dim)
-                x_samples = z_trajectory[:, -1, :]
-            else:
-                x_samples = parametric_model(z_samples, params=p)  # (batch_size, dim)
-            energy = 0.0
-            linear_energy = 0.0
-            internal_energy = 0.0
-            interaction_energy = 0.0
-            # Linear potential
-            if self.linear is not None:
+        graphdef, _ = nnx.split(parametric_model)
 
-                linear_energy, _ = self.linear.evaluate_energy(
-                    parametric_model, z_samples, x_samples=x_samples
-                )
-                linear_energy = linear_energy * self.linear.coeff
-                energy += linear_energy
-            # Internal potential
-            if self.internal is not None:
-                internal_energy = self.internal(
-                    parametric_model=parametric_model,
-                    z_samples=z_samples,
-                    z_trajectory=z_trajectory,
-                    time_steps=time_steps,
-                    params=p,
-                )
+        # Build and cache a JIT-compiled energy gradient function on the first call
+        # (or when the model architecture changes). The graphdef is structural/static
+        # and captured in the closure; z_samples and params are the only dynamic inputs.
+        # This avoids re-tracing the entire computation graph on every iteration.
+        if self._compiled_energy_grad is None or self._compiled_graphdef != graphdef:
+            self._compiled_graphdef = graphdef
+            linear = self.linear
+            internal = self.internal
+            interaction = self.interaction
 
-                energy += internal_energy
-            # Interaction potential
-            if self.interaction is not None:
-                batch_size = z_samples.shape[0]
-                # Obtain samples for interaction energy computation
-                part1_samples = x_samples[: batch_size // 2, :]
-                part2_samples = x_samples[batch_size // 2 :, :]
-                if part1_samples.shape[0] < part2_samples.shape[0]:
-                    part2_samples = part2_samples[: part1_samples.shape[0], :]
-                elif part2_samples.shape[0] < part1_samples.shape[0]:
-                    part1_samples = part1_samples[: part2_samples.shape[0], :]
-                interaction_energy, _ = self.interaction.evaluate_energy(
-                    parametric_model,
-                    z_samples,
-                    x_samples=part1_samples,
-                    y_samples=part2_samples,
-                    params=p,
-                )
+            @jax.jit
+            def _jitted_energy_grad(z_samp: Array, p: PyTree):
+                def energy_evaluation(p_inner: PyTree):
+                    # Use ParametricModel.apply so the forward pass is JIT-safe
+                    if internal is not None:
+                        z_trajectory, time_steps = ParametricModel.apply(
+                            graphdef, p_inner, z_samp, history=True
+                        )
+                        x_samples = z_trajectory[:, -1, :]
+                    else:
+                        x_samples = ParametricModel.apply(graphdef, p_inner, z_samp)
 
-                energy += interaction_energy * self.interaction.coeff
+                    energy = 0.0
+                    linear_energy = 0.0
+                    internal_energy = 0.0
+                    interaction_energy = 0.0
 
-            energy_breakdown = {
-                "internal_energy": internal_energy,
-                "linear_energy": linear_energy,
-                "interaction_energy": interaction_energy,
-            }
-            return energy, energy_breakdown
+                    if linear is not None:
+                        _model = nnx.merge(graphdef, p_inner)
+                        linear_energy, _ = linear.evaluate_energy(
+                            _model, z_samp, x_samples=x_samples
+                        )
+                        linear_energy = linear_energy * linear.coeff
+                        energy += linear_energy
 
-        (energy, energy_breakdown), energy_grad = jax.value_and_grad(
-            energy_evaluation, has_aux=True
-        )(params)
+                    if internal is not None:
+                        _model = nnx.merge(graphdef, p_inner)
+                        internal_energy = internal(
+                            parametric_model=_model,
+                            z_samples=z_samp,
+                            z_trajectory=z_trajectory,
+                            time_steps=time_steps,
+                            params=p_inner,
+                        )
+                        energy += internal_energy
 
-        return energy_grad, energy, energy_breakdown
+                    if interaction is not None:
+                        batch_size = z_samp.shape[0]
+                        part1_samples = x_samples[: batch_size // 2, :]
+                        part2_samples = x_samples[batch_size // 2 :, :]
+                        if part1_samples.shape[0] < part2_samples.shape[0]:
+                            part2_samples = part2_samples[: part1_samples.shape[0], :]
+                        elif part2_samples.shape[0] < part1_samples.shape[0]:
+                            part1_samples = part1_samples[: part2_samples.shape[0], :]
+                        _model = nnx.merge(graphdef, p_inner)
+                        interaction_energy, _ = interaction.evaluate_energy(
+                            _model,
+                            z_samp,
+                            x_samples=part1_samples,
+                            y_samples=part2_samples,
+                            params=p_inner,
+                        )
+                        energy += interaction_energy * interaction.coeff
+
+                    energy_breakdown = {
+                        "internal_energy": internal_energy,
+                        "linear_energy": linear_energy,
+                        "interaction_energy": interaction_energy,
+                    }
+                    return energy, energy_breakdown
+
+                (energy, energy_breakdown), energy_grad = jax.value_and_grad(
+                    energy_evaluation, has_aux=True
+                )(p)
+                return energy_grad, energy, energy_breakdown
+
+            self._compiled_energy_grad = _jitted_energy_grad
+
+        return self._compiled_energy_grad(z_samples, params)
 

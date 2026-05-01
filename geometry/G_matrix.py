@@ -33,21 +33,17 @@ class G_matrix:
 
     @partial(jit, static_argnums=(0,))
     def mvp(
-        self, z_samples: Array, eta: PyTree, params: Optional[PyTree] = None
+        self, z_samples: Array, eta: PyTree, params: PyTree
     ) -> PyTree:
         """
         Computation of G eta
         Args:
             z_samples: (Bs,d) Samples from reference density
             eta: PyTree with same GraphDef as mapping
-            parms: PyTree where the G matrix is computed at
+            params: PyTree where the G matrix is computed at (required)
         Return:
             G(theta) eta : PyTree
         """
-
-        if params is None:
-
-            _, params = nnx.split(self.mapping)
 
         def single_sample_contribution(z: Array) -> PyTree:
 
@@ -75,12 +71,12 @@ class G_matrix:
 
         return jax.tree.map(lambda x: jnp.mean(x, axis=0), contributions)
 
-    # @partial(jit,static_argnums = (0,6))
+    @partial(jit, static_argnums=(0, 6))
     def solve_system(
         self,
         z_samples: Array,
         b: PyTree,
-        params: Optional[PyTree] = None,
+        params: PyTree,
         tol: float = 1e-5,
         maxiter: int = 10,
         method: str = "cg",
@@ -113,8 +109,6 @@ class G_matrix:
             solver = gmres
         elif method == "minres":
             solver = minres
-        if params is None:
-            _, params = nnx.split(self.mapping)
         # Define the linear operator for G(theta)
         matvec = lambda eta: self.mvp(z_samples, eta, params)
         # Use Jax inbuilts methods cg or gmres.
@@ -136,7 +130,7 @@ class G_matrix:
         return x, info
 
     def inner_product(
-        self, x: PyTree, y: PyTree, z_samples: Array, params: Optional[PyTree] = None
+        self, x: PyTree, y: PyTree, z_samples: Array, params: PyTree
     ) -> float:
         """
         Compute the inner product <x,y>_G = x^T G y
@@ -166,7 +160,7 @@ class G_matrix:
         return inner_product
 
     def metric_derivative_quadratic_form(
-        self, z_samples: Array, eta: PyTree, params: Optional[PyTree] = None
+        self, z_samples: Array, eta: PyTree, params: PyTree
     ) -> PyTree:
         """
         Compute the gradient of the G matrix in the direction eta. We are returning the PyTree
@@ -176,14 +170,11 @@ class G_matrix:
         Args:
             z_samples: (Bs,d) Samples from reference density
             eta: PyTree with same GraphDef as mapping
-            parms: PyTree where the G matrix is computed at
+            params: PyTree where the G matrix is computed at (required)
 
         Returns:
             grad_G: PyTree with same GraphDef as mapping
         """
-
-        if params is None:
-            _, params = nnx.split(self.mapping)
 
         # Stop gradients for eta
         eta_sg = jax.lax.stop_gradient(eta)

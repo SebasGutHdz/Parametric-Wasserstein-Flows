@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,6 +17,7 @@ from jax import Device
 from geometry.G_matrix import G_matrix
 from geometry.lin_alg_solvers import minres
 from flows.anderson_acceleration_step import anderson_step
+from flows.work_accounting import WorkCounter
 
 from functionals.functional import Potential
 from parametric_model.parametric_model import ParametricModel
@@ -33,7 +35,7 @@ def anderson_method(
     memory_size: int = 5,
     relaxation: float = 1.0,
     anderson_tol: float = 1e-6,
-    solver: str = "minres",
+    solver: str = "cg",
     solver_tol: float = 1e-6,
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
@@ -96,10 +98,11 @@ def anderson_method(
         current_params = initial_params
 
     # Storage for tracking progress
-    params_trajectory = [initial_params]
-    residual_norms = []
+    params_trajectory = [current_params]
+    residual_norms = [float("nan")]
     energy_trajectory = []
     gamma_history = []
+    work_counter = WorkCounter()
     # Obtain problem dimension from test data set
     problem_dim = test_data_set.shape[1]
     # Initialize key for sample generation
@@ -116,15 +119,34 @@ def anderson_method(
         print(f"  mixing_parameter: {relaxation}")
         print("-" * 60)
 
+    run_start = time.perf_counter()
+
     # evaluate initial energy
-    key, subkey = jax.random.split(key)
-    z_samples = jax.random.normal(subkey, (batch_size, problem_dim))
     energy_init, _, _, _, _ = potential.evaluate_energy(
-        parametric_model, z_samples=z_samples
+        parametric_model=parametric_model,
+        z_samples=test_data_set,
+        params=current_params,
     )
     energy_trajectory.append(float(energy_init))
+    work_history = [work_counter.snapshot()]
 
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "method": "anderson",
+                "iteration": -1,
+                "max_iterations": n_iterations,
+                "energy": float(energy_init),
+                "riemann_grad_norm": float("nan"),
+                "scatter_samples": None,
+                "converged": False,
+                **work_history[-1],
+            }
+        )
+
+    final_iteration = -1
     for iteration in range(n_iterations):
+        final_iteration = iteration
         key, subkey = jax.random.split(key)
         z_samples = jax.random.normal(subkey, (batch_size, problem_dim))
         # Perform Anderson acceleration step
@@ -149,16 +171,10 @@ def anderson_method(
             regularization_factor_gamma=regularization_factor_gamma,
             regularization_method_gamma=regularization_method_gamma,
             ensure_descent=ensure_descent,
+            work_counter=work_counter,
         )
-
-        if iteration == 0:
-            init_params = param_history[-1]
-            init_residual = residual_history[-1]
-            init_res_norm_sq = G_mat.inner_product(
-                init_residual, init_residual, z_samples, init_params
-            )
-
-            residual_norms.append(jnp.sqrt(jnp.maximum(init_res_norm_sq, 0.0)))
+        work_snapshot = work_counter.snapshot()
+        work_history.append(work_snapshot)
 
         # Extract new parameters (newest in history)
         current_params = param_history[0]
@@ -166,7 +182,7 @@ def anderson_method(
 
         # Compute residual norm using G-matrix inner product at the test data set
         residual_norm_sq = G_mat.inner_product(
-            current_residual, current_residual, test_data_set
+            current_residual, current_residual, test_data_set, current_params
         )
         if residual_norm_sq >= -1e-10:  # some tolerance for numerical error
             residual_norm = jnp.sqrt(jnp.maximum(residual_norm_sq, 0.0))
@@ -207,6 +223,7 @@ def anderson_method(
                     "riemann_grad_norm": float(residual_norm / step_size),
                     "scatter_samples": scatter_samples,
                     "converged": False,
+                    **work_snapshot,
                 }
             )
 
@@ -254,17 +271,29 @@ def anderson_method(
             print(f"Final residual norm: {residual_norms[-1]:.6e}")
             print(f"Final energy: {energy_trajectory[-1]:.6e}")
 
+    elapsed_total_sec = time.perf_counter() - run_start
+    work_summary = work_counter.snapshot()
+    work_summary["elapsed_total_sec"] = elapsed_total_sec
+
     # Build history dictionary
     history = {
         "params": params_trajectory,
         "residual_norms": residual_norms,
         "riemann_grad_history": [_r / step_size for _r in residual_norms],
         "energies": energy_trajectory,
-        "final_iteration": iteration if converged else n_iterations - 1,
+        "final_iteration": final_iteration,
         "param_history": param_history,
         "residual_history": residual_history,
         "param_diffs": param_diffs,
         "residual_diffs": residual_diffs,
+        "work_history": work_history,
+        "work_summary": work_summary,
+        "opt_mvp_equiv_history": [
+            row["opt_mvp_equiv_cum"] for row in work_history
+        ],
+        "opt_mvp_equiv_sample_work_history": [
+            row["opt_mvp_equiv_sample_work_cum"] for row in work_history
+        ],
     }
 
     return current_params, history

@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -17,6 +18,7 @@ from geometry.G_matrix import G_matrix
 
 from functionals.functional import Potential
 from flows.gradient_flow_step import gradient_flow_step
+from flows.work_accounting import WorkCounter
 from parametric_model.parametric_model import ParametricModel
 from flows.visualization import plot_gradient_flow
 
@@ -80,6 +82,30 @@ def run_gradient_flow(
     sample_history = []  # Store samples at key iterations for visualization
     euclid_grad_norm_history = []
     riemann_grad_norm_history = []
+    work_counter = WorkCounter()
+    run_start = time.perf_counter()
+
+    initial_energy, samples0, _, _, _ = potential.evaluate_energy(
+        current_parametric_model, z_samples
+    )
+    energy_history = [float(initial_energy)]
+    euclid_grad_norm_history = [float("nan")]
+    riemann_grad_norm_history = [float("nan")]
+    work_history = [work_counter.snapshot()]
+
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "method": "gradient_flow",
+                "iteration": -1,
+                "max_iterations": max_iterations,
+                "energy": float(initial_energy),
+                "riemann_grad_norm": float("nan"),
+                "scatter_samples": None,
+                "converged": False,
+                **work_history[-1],
+            }
+        )
 
     # Initialize key for sample generation
     key = jax.random.PRNGKey(0)
@@ -90,10 +116,6 @@ def run_gradient_flow(
 
     for iteration in iterator:
 
-        if iteration == 0:
-            _, samples0, _, _, _ = potential.evaluate_energy(
-                current_parametric_model, z_samples
-            )
         # Generate key and samples for evaluation
         key, subkey = jax.random.split(key)
         z_samples_eval = jax.random.normal(
@@ -108,17 +130,22 @@ def run_gradient_flow(
             step_size=h,
             solver=solver,
             solver_tol=tolerance,
-            solver_maxiter= solver_maxiter,
+            solver_maxiter=solver_maxiter,
             regularization=regularization,
+            work_counter=work_counter,
         )
+        work_snapshot = work_counter.snapshot()
+        work_history.append(work_snapshot)
 
         # Evaluate new energy
         # _, current_params = nnx.split(current_parametric_model)
         current_params = nnx.state(current_parametric_model)
-        current_energy = step_info["energy"]
+        current_energy, samples1, _, _, _ = potential.evaluate_energy(
+            current_parametric_model, z_samples, current_params
+        )
 
         # Store diagnostics
-        energy_history.append(float(step_info["energy"]))
+        energy_history.append(float(current_energy))
         solver_stats.append(step_info)
         param_norm = jnp.sqrt(
             sum(jax.tree.leaves(jax.tree.map(lambda x: jnp.sum(x**2), current_params)))
@@ -151,22 +178,20 @@ def run_gradient_flow(
                     "method": "gradient_flow",
                     "iteration": iteration,
                     "max_iterations": max_iterations,
-                    "energy": float(step_info["energy"]),
+                    "energy": float(current_energy),
                     "riemann_grad_norm": float(step_info["riemann_gradient_norm"]),
                     "scatter_samples": scatter_samples,
                     "converged": False,
+                    **work_snapshot,
                 }
             )
 
         # Progress reporting
         if iteration % progress_every == 0 and iteration > 0:
-            current_energy, samples1, _, _, _ = potential.evaluate_energy(
-                current_parametric_model, z_samples, current_params
-            )
             sample_history.append(samples1)
             if verbose:
                 print(
-                    f"Iter {iteration:3d}: Energy = {step_info['energy']:.6f}, "
+                    f"Iter {iteration:3d}: Energy = {current_energy:.6f}, "
                     f"Grad norm: {step_info['gradient_norm']:.2e}"
                 )
 
@@ -190,9 +215,7 @@ def run_gradient_flow(
             samples0 = samples1
         if iteration == 0:
             # for plotting sample at previous checkpoint vs current
-            _, samples0, _, _, _ = potential.evaluate_energy(
-                current_parametric_model, z_samples, current_params
-            )
+            samples0 = samples1
         # Early stopping conditions
 #        if (
 #            iteration > 5
@@ -205,14 +228,10 @@ def run_gradient_flow(
     if p_bar is not None:
         p_bar.close()
 
-    # eval energy of the final iterate
-    final_energy, samples0, _, _, _ = potential.evaluate_energy(
-        current_parametric_model,
-        z_samples,
-    )
+    final_energy = energy_history[-1]
+    elapsed_total_sec = time.perf_counter() - run_start
 
     # Final summary
-    energy_history.append(final_energy)
     total_decrease = energy_history[0] - final_energy
 
     if verbose:
@@ -222,7 +241,11 @@ def run_gradient_flow(
         print(f"Final energy:        {final_energy:.6f}")
         print(f"Total decrease:      {total_decrease:.6f}")
         print(f"Reduction ratio:     {final_energy/energy_history[0]:.4f}")
-        print(f"Final param norm:    {param_norms[-1]:.6f}")
+        if param_norms:
+            print(f"Final param norm:    {param_norms[-1]:.6f}")
+
+    work_summary = work_counter.snapshot()
+    work_summary["elapsed_total_sec"] = elapsed_total_sec
 
     return {
         "final_parametric_model": current_parametric_model,
@@ -231,10 +254,21 @@ def run_gradient_flow(
         "riemann_grad_norm_history": riemann_grad_norm_history,
         "param_norms": param_norms,
         "sample_history": sample_history,
+        "work_history": work_history,
+        "work_summary": work_summary,
+        "opt_mvp_equiv_history": [
+            row["opt_mvp_equiv_cum"] for row in work_history
+        ],
+        "opt_mvp_equiv_sample_work_history": [
+            row["opt_mvp_equiv_sample_work_cum"] for row in work_history
+        ],
         "potential": potential,
         "convergence_info": {
             "converged": final_energy < tolerance
-            or abs(energy_history[-1] - energy_history[-2]) < tolerance * 1e-2,
+            or (
+                len(energy_history) > 1
+                and abs(energy_history[-1] - energy_history[-2]) < tolerance * 1e-2
+            ),
             "final_energy": final_energy,
             "total_decrease": total_decrease,
             "iterations": len(energy_history) - 1,

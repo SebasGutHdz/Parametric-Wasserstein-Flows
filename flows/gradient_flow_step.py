@@ -16,6 +16,7 @@ from jax import Device
 from geometry.G_matrix import G_matrix
 from functionals.functional import Potential
 from core.utility import _params_scalar_product
+from flows.work_accounting import WorkCounter
 
 from tqdm import tqdm
 
@@ -35,11 +36,12 @@ def gradient_flow_step(
     G_mat: G_matrix,
     potential: Potential,
     step_size: float = 0.01,
-    solver: str = "minres",
+    solver: str = "cg",
     solver_tol: float = 1e-6,
     solver_maxiter: int = 50,
     regularization: float = 1e-6,
     only_return_params: bool = False,
+    work_counter: WorkCounter | None = None,
 ) -> Tuple[Union[nnx.Module, PyTree], dict]:
     """
     Generic gradient flow step that works with any Potential
@@ -63,6 +65,8 @@ def gradient_flow_step(
     current_params = nnx.state(parametric_model)
 
     # Compute energy gradient using the potential
+    if work_counter is not None:
+        work_counter.record_grad(z_samples)
     energy_grad, energy, energy_breakdown = potential.compute_energy_gradient(
         parametric_model, z_samples, current_params
     )
@@ -70,6 +74,8 @@ def gradient_flow_step(
     # Solve linear system
     # z_samples_g_mat = z_samples[::2]  # Use a subset of samples for G-matrix to save computation
 
+    if work_counter is not None:
+        work_counter.record_solve(z_samples, solver_maxiter)
     eta, solver_info = G_mat.solve_system(
         z_samples,
         energy_grad,
@@ -84,13 +90,11 @@ def gradient_flow_step(
     updated_params = jax.tree.map(lambda p, e: p - step_size * e, current_params, eta)
 
     if only_return_params:
-        return updated_params, {}
+        return updated_params, {"eta": eta}
 
     # Create updated parametric model
-    # graphdef, _ = nnx.split(parametric_model)
-    # updated_parametric_model = nnx.merge(graphdef, updated_params)
-    updated_parametric_model = nnx.clone(parametric_model)
-    nnx.update(updated_parametric_model,updated_params)
+    graphdef, _ = nnx.split(parametric_model)
+    updated_parametric_model = nnx.merge(graphdef, updated_params)
     # updated_parametric_model = move_to_device(updated_parametric_model, device)
     # Compute diagnostics
     grad_norm = jnp.sqrt(

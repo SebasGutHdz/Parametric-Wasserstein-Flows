@@ -29,7 +29,7 @@ def memoryless_qn_step(
     G_mat: G_matrix,
     potential: Potential,
     z_samples: Array,
-    solver: str = "minres",  # \
+    solver: str = "cg",  # \
     solver_tol: float = 1e-6,  #  > linear solver parameters for the computation of Riemannian gradient
     solver_maxiter: int = 50,  # /
     solver_regularization: float = 1e-6,
@@ -175,7 +175,7 @@ def memoryless_qn_step(
         w_cur,
     )
 
-    if ensure_descent and G_mat.inner_product(delta_theta, g_cur, z_samples) >= 0.0:
+    if ensure_descent and G_mat.inner_product(delta_theta, g_cur, z_samples, current_params) >= 0.0:
         delta_theta = jax.tree.map(lambda x: -step_size * x, g_cur)
 
     # update the parameters and the parametric model

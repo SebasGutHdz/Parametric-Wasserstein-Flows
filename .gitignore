@@ -172,7 +172,11 @@ cython_debug/
 # Data bayesian logistic regression
 /data
 /datasets
-/experiments
+/experiments/_pycache_
+/experiments/configs
+/experiments/experiments
+/experiments/results
+/experiments/runners
 dataset_loading_test.ipynb
 
 
