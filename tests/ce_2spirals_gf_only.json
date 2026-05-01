@@ -1,0 +1,74 @@
+{
+  "output_root": "results/mmd_2spirals_gf_only",
+  "common_params": {
+    "seed": 0,
+    "dimension": 2,
+    "n_hidden": 3,
+    "width_hidden": 128,
+    "parametric_map": "node",
+    "rhs_model": "mlp",
+    "activation_fn": "swish",
+    "time_dependent": true,
+    "ode_solver": "euler",
+    "dt0": 0.1,
+    "ref_density": "gaussian",
+    "scale_factor": 0.1,
+    "N_samples": 10000,
+    "eval_samples": 600,
+    "plot_n_samples": 3000,
+    "max_iterations": 10000,
+    "linear_solver": "cg",
+    "live_plot_every": 100,
+    "tolerance": 1e-6
+  },
+  "problems": [
+    {
+      "functional": {
+        "kind": "CrossEntropy"
+      },
+      "distribution": {
+        "name": "2spirals",
+        "n_samples": 10000,
+        "resample_each": 30,
+        "seed": 3
+      }
+    }
+  ],
+  "methods": {
+    "gradient_flow": {
+        "stepsize": [0.01, 0.005],
+        "regularization": [1e-1, 1e-3, 1e-5]
+    }
+
+
+  },
+  "parallel": {
+    "max_workers": 1,
+    "gpu_ids": [0],
+    "disable_preallocate": true
+  },
+  "plotting": {
+    "figsize": [17, 6],
+    "scatter_figsize": [8, 8],
+    "method_colormaps": {
+      "gradient_flow": "Greens",
+      "anderson": "coolwarm"
+    },
+    "style_channels": ["color", "linestyle", "linewidth"],
+    "style_values": {
+      "linestyle": ["-", "--", ":"],
+      "linewidth": [2.0, 1.5]
+    },
+    "scatter_size": 22,
+    "gf_alpha": 0.45,
+    "method_alpha": 0.55,
+    "target_scatter_size": 6.0,
+    "target_scatter_alpha": 0.9,
+    "target_scatter_marker": "*",
+    "target_scatter_facecolors": "none",
+    "target_scatter_edgecolors": "blue",
+    "target_scatter_linewidths": 0.6,
+    "target_scatter_zorder": 0,
+    "target_scatter_label": "target"
+  }
+}
